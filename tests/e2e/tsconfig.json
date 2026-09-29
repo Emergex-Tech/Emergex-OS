@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["../../src/*"],
+      "next/headers": ["./mocks/next-headers.ts"],
+      "@supabase/ssr": ["./mocks/supabase-ssr.ts"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": []
+}
