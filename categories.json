@@ -1,0 +1,250 @@
+{
+  "_note": "DRAFT — reconstructed from PRD Appendix C only. The real categories.json (referenced in the PRD as the source of truth) wasn't available, so property/item field lists below are our best judgment, not authoritative. Review every field list before relying on the dynamic forms it drives.",
+
+  "reconfirmation_rules": {
+    "sponsorship": {
+      "description": "No check until 90 days before the event; then every 30 days; every 7 days from 30 days out. No event date: every 30 days.",
+      "type": "event_taper",
+      "steps": [
+        { "days_before_event_gte": 90, "interval_days": null },
+        { "days_before_event_gte": 30, "interval_days": 30 },
+        { "days_before_event_gte": 0, "interval_days": 7 }
+      ],
+      "no_event_date_interval_days": 30
+    },
+    "60day": { "description": "Every 60 days", "type": "flat", "interval_days": 60 },
+    "90day": { "description": "Every 90 days; talent shortened by override while active", "type": "flat", "interval_days": 90 }
+  },
+
+  "categories": [
+    {
+      "key": "league_tournament",
+      "label": "League and tournament",
+      "group": "Rights and sponsorship",
+      "reconfirmation_rule": "sponsorship",
+      "property_label": "League season",
+      "item_label": "Tier or asset (title, LED, pitch mat)",
+      "property_fields": [
+        { "key": "league_name", "type": "text", "required": true },
+        { "key": "sport", "type": "text", "required": true },
+        { "key": "season_year", "type": "text", "required": true },
+        { "key": "market", "type": "text", "required": true },
+        { "key": "event_dates", "type": "date_range", "required": false },
+        { "key": "broadcast_reach", "type": "text", "required": false },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true },
+        { "key": "exclusivity", "type": "text", "required": false }
+      ],
+      "item_fields": [
+        { "key": "asset_type", "type": "select", "options": ["title_sponsorship", "led_perimeter", "pitch_mat", "kit_asset", "other"], "required": true },
+        { "key": "unit_description", "type": "text", "required": false },
+        { "key": "quantity", "type": "number", "required": false }
+      ],
+      "price_unit_options": ["flat", "per_match", "per_season"]
+    },
+    {
+      "key": "team",
+      "label": "Team",
+      "group": "Rights and sponsorship",
+      "reconfirmation_rule": "sponsorship",
+      "property_label": "Team season",
+      "item_label": "Kit or asset position",
+      "property_fields": [
+        { "key": "team_name", "type": "text", "required": true },
+        { "key": "sport", "type": "text", "required": true },
+        { "key": "season_year", "type": "text", "required": true },
+        { "key": "market", "type": "text", "required": true },
+        { "key": "event_dates", "type": "date_range", "required": false },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true }
+      ],
+      "item_fields": [
+        { "key": "asset_position", "type": "select", "options": ["shirt_front", "shirt_back", "sleeve", "shorts", "led", "other"], "required": true }
+      ],
+      "price_unit_options": ["flat", "per_season"]
+    },
+    {
+      "key": "player_athlete",
+      "label": "Player and athlete",
+      "group": "Rights and sponsorship",
+      "reconfirmation_rule": "90day",
+      "property_label": "Player",
+      "item_label": "Rights package",
+      "property_fields": [
+        { "key": "player_name", "type": "text", "required": true },
+        { "key": "sport", "type": "text", "required": true },
+        { "key": "markets", "type": "text", "required": true },
+        { "key": "management_contact", "type": "text", "required": false },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true }
+      ],
+      "item_fields": [
+        { "key": "package_type", "type": "select", "options": ["ambassador", "appearance", "social_content", "other"], "required": true },
+        { "key": "term_length", "type": "text", "required": false }
+      ],
+      "price_unit_options": ["per_year", "per_appearance", "flat"]
+    },
+    {
+      "key": "celebrity_talent",
+      "label": "Celebrity and talent",
+      "group": "Rights and sponsorship",
+      "reconfirmation_rule": "90day",
+      "property_label": "Talent",
+      "item_label": "Endorsement package",
+      "property_fields": [
+        { "key": "talent_name", "type": "text", "required": true },
+        { "key": "category", "type": "text", "required": false },
+        { "key": "markets", "type": "text", "required": true },
+        { "key": "management_contact", "type": "text", "required": false },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true }
+      ],
+      "item_fields": [
+        { "key": "package_type", "type": "select", "options": ["endorsement", "appearance", "content", "other"], "required": true }
+      ],
+      "price_unit_options": ["per_year", "per_appearance", "flat"]
+    },
+    {
+      "key": "influencer_creator",
+      "label": "Influencer and creator",
+      "group": "Creators",
+      "reconfirmation_rule": "60day",
+      "property_label": "Creator",
+      "item_label": "Deliverable",
+      "property_fields": [
+        { "key": "creator_name", "type": "text", "required": true },
+        { "key": "platform", "type": "select", "options": ["instagram", "tiktok", "youtube", "twitch", "x", "other"], "required": true },
+        { "key": "follower_count", "type": "number", "required": false },
+        { "key": "markets", "type": "text", "required": true },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true },
+        { "key": "roster_exclusivity", "type": "boolean", "required": false }
+      ],
+      "item_fields": [
+        { "key": "deliverable_type", "type": "select", "options": ["post", "reel", "story", "video", "livestream", "bundle"], "required": true },
+        { "key": "quantity", "type": "number", "required": false }
+      ],
+      "price_unit_options": ["per_deliverable", "per_campaign", "flat"]
+    },
+    {
+      "key": "broadcast_streaming",
+      "label": "Broadcast and streaming",
+      "group": "Media",
+      "reconfirmation_rule": "sponsorship",
+      "property_label": "Channel or platform",
+      "item_label": "Ad product",
+      "property_fields": [
+        { "key": "channel_name", "type": "text", "required": true },
+        { "key": "markets", "type": "text", "required": true },
+        { "key": "event_dates", "type": "date_range", "required": false },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true }
+      ],
+      "item_fields": [
+        { "key": "ad_product", "type": "select", "options": ["spot", "sponsorship_billboard", "overlay", "integration", "other"], "required": true }
+      ],
+      "price_unit_options": ["flat", "per_spot", "per_match"]
+    },
+    {
+      "key": "digital_publisher_app",
+      "label": "Digital publisher and app",
+      "group": "Media",
+      "reconfirmation_rule": "60day",
+      "property_label": "Site or app",
+      "item_label": "Ad product",
+      "property_fields": [
+        { "key": "site_or_app_name", "type": "text", "required": true },
+        { "key": "markets", "type": "text", "required": true },
+        { "key": "monthly_traffic", "type": "text", "required": false },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true }
+      ],
+      "item_fields": [
+        { "key": "ad_product", "type": "select", "options": ["banner", "takeover", "native", "push", "other"], "required": true }
+      ],
+      "price_unit_options": ["per_week", "per_month", "cpm", "flat"]
+    },
+    {
+      "key": "ooh_led",
+      "label": "OOH and LED",
+      "group": "Media",
+      "reconfirmation_rule": "60day",
+      "property_label": "Site or network",
+      "item_label": "Slot for a period",
+      "property_fields": [
+        { "key": "site_or_network_name", "type": "text", "required": true },
+        { "key": "markets", "type": "text", "required": true },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true }
+      ],
+      "item_fields": [
+        { "key": "slot_period", "type": "text", "required": false },
+        { "key": "location_detail", "type": "text", "required": false }
+      ],
+      "price_unit_options": ["per_match", "per_week", "flat"]
+    },
+    {
+      "key": "transit_vehicle",
+      "label": "Transit and vehicle",
+      "group": "Media",
+      "reconfirmation_rule": "60day",
+      "property_label": "Fleet",
+      "item_label": "Branding package",
+      "property_fields": [
+        { "key": "fleet_operator", "type": "text", "required": true },
+        { "key": "markets", "type": "text", "required": true },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true }
+      ],
+      "item_fields": [
+        { "key": "vehicle_count", "type": "number", "required": false },
+        { "key": "branding_type", "type": "select", "options": ["full_wrap", "partial_wrap", "interior", "other"], "required": true }
+      ],
+      "price_unit_options": ["flat", "per_vehicle"]
+    },
+    {
+      "key": "ip_shows",
+      "label": "IP and shows",
+      "group": "IP and content",
+      "reconfirmation_rule": "sponsorship",
+      "property_label": "Show or IP",
+      "item_label": "Integration",
+      "property_fields": [
+        { "key": "show_or_ip_name", "type": "text", "required": true },
+        { "key": "markets", "type": "text", "required": true },
+        { "key": "event_dates", "type": "date_range", "required": false },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true }
+      ],
+      "item_fields": [
+        { "key": "integration_type", "type": "select", "options": ["product_placement", "branded_segment", "co_created", "other"], "required": true }
+      ],
+      "price_unit_options": ["flat", "per_episode"]
+    },
+    {
+      "key": "content_production",
+      "label": "Content and production",
+      "group": "IP and content",
+      "reconfirmation_rule": "90day",
+      "property_label": "Production vendor",
+      "item_label": "Package",
+      "property_fields": [
+        { "key": "vendor_name", "type": "text", "required": true },
+        { "key": "markets", "type": "text", "required": true },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true }
+      ],
+      "item_fields": [
+        { "key": "package_type", "type": "select", "options": ["shoot_day", "edit_package", "full_campaign", "other"], "required": true }
+      ],
+      "price_unit_options": ["flat", "per_day"]
+    },
+    {
+      "key": "events_activations",
+      "label": "Events and activations",
+      "group": "On-ground",
+      "reconfirmation_rule": "sponsorship",
+      "property_label": "Event",
+      "item_label": "Partnership package",
+      "property_fields": [
+        { "key": "event_name", "type": "text", "required": true },
+        { "key": "markets", "type": "text", "required": true },
+        { "key": "event_dates", "type": "date_range", "required": true },
+        { "key": "gaming_brand_acceptance", "type": "select", "options": ["accepted", "case_by_case", "not_accepted"], "required": true }
+      ],
+      "item_fields": [
+        { "key": "package_type", "type": "select", "options": ["title_partner", "activation_booth", "sampling", "other"], "required": true }
+      ],
+      "price_unit_options": ["flat", "per_day"]
+    }
+  ]
+}

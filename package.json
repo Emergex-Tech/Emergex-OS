@@ -1,0 +1,39 @@
+{
+  "name": "ex-os",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "load-categories": "tsx scripts/load-categories.ts",
+    "test:logic": "tsx tests/block3.test.ts",
+    "test:e2e": "tsx --tsconfig tests/e2e/tsconfig.json tests/e2e/run.ts"
+  },
+  "dependencies": {
+    "@googleapis/drive": "^26.0.1",
+    "@supabase/ssr": "^0.5.1",
+    "@supabase/supabase-js": "^2.45.0",
+    "exceljs": "^4.4.0",
+    "google-auth-library": "^11.1.0",
+    "next": "14.2.5",
+    "papaparse": "^5.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/papaparse": "^5.3.14",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.41",
+    "tailwindcss": "^3.4.10",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  }
+}
