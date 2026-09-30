@@ -9,6 +9,7 @@ import { NextRequest } from 'next/server'
 const TEAM = '11111111-0000-0000-0000-000000000001'
 const MANAGER = '22222222-0000-0000-0000-000000000002'
 const CEO = '33333333-0000-0000-0000-000000000003'
+const SPARE_CEO = '55555555-0000-0000-0000-000000000005' // for the "only a CEO can demote a CEO" test — see fixtures.sql
 const POSTGREST = process.env.POSTGREST_URL ?? 'http://127.0.0.1:3000'
 const SECRET = process.env.JWT_SECRET ?? 'e2e-secret-e2e-secret-e2e-secret-1234'
 const PROXY_PORT = 3001
@@ -82,7 +83,9 @@ async function main() {
     shares: await load('shares'), competitors: await load('competitor-links'), competitorById: await load('competitor-links/[id]'),
     importV: await load('import/vendors'), importI: await load('import/inventory'), overrides: await load('overrides'),
     overrideApprove: await load('overrides/[id]/approve'), scoreChanges: await load('route-score-changes'),
-    scoreApprove: await load('route-score-changes/[id]/approve'), intel: await load('intel-notes'), health: await load('health')
+    scoreApprove: await load('route-score-changes/[id]/approve'), intel: await load('intel-notes'), health: await load('health'),
+    users: await load('users'), userById: await load('users/[id]'), userDisable: await load('users/[id]/disable'),
+    userEnable: await load('users/[id]/enable'), userResetPw: await load('users/[id]/reset-password'), changePw: await load('account/change-password')
   }
 
   const S: Record<string, string> = {}
@@ -246,6 +249,44 @@ async function main() {
   await step('A5: everything already shared with Blitz is listed, newest first, with the route', async () => {
     const r = await call(H.brandShares.GET, { as: TEAM, params: { id: S.Blitz } })
     assert.ok(r.json.length >= 3); assert.equal(r.json[0].item, 'Perimeter slot'); assert.ok(r.json.some((s: any) => s.route === 'via Meridian Sports'))
+  })
+
+  console.log('\nAdmin-managed users (permission gates + role logic only — see note below)')
+  // NOTE: auth.admin.createUser/updateUserById/deleteUser hit Supabase's Auth (GoTrue) service, which
+  // has no equivalent running in this sandbox (only PostgREST does). So account creation, password
+  // reset, and disable/enable are NOT exercised here — only the logic that runs before/around them:
+  // permission checks (which reject before ever calling auth.admin) and the role-change endpoint
+  // (which never calls auth.admin at all). Verify account creation for real on first deploy.
+  await step('every user-management endpoint rejects Team before touching auth.admin at all', async () => {
+    assert.equal((await call(H.users.POST, { as: TEAM, method: 'POST', body: { full_name: 'X', email: 'x@x.com', role_key: 'team' } })).status, 403)
+    assert.equal((await call(H.users.GET, { as: TEAM })).status, 403)
+    assert.equal((await call(H.userDisable.PATCH, { as: TEAM, method: 'PATCH', params: { id: MANAGER } })).status, 403)
+    assert.equal((await call(H.userEnable.PATCH, { as: TEAM, method: 'PATCH', params: { id: MANAGER } })).status, 403)
+    assert.equal((await call(H.userResetPw.POST, { as: TEAM, method: 'POST', params: { id: MANAGER } })).status, 403)
+  })
+  await step('validation runs before any auth.admin call: bad email, missing name, bad role are all refused', async () => {
+    assert.equal((await call(H.users.POST, { as: MANAGER, method: 'POST', body: { full_name: 'X', email: 'not-an-email', role_key: 'team' } })).status, 400)
+    assert.equal((await call(H.users.POST, { as: MANAGER, method: 'POST', body: { email: 'x@x.com', role_key: 'team' } })).status, 400)
+    assert.equal((await call(H.users.POST, { as: MANAGER, method: 'POST', body: { full_name: 'X', email: 'x@x.com', role_key: 'superadmin' } })).status, 400)
+  })
+  await step('role changes (no auth.admin involved) — Manager can promote Team, cannot demote a CEO, CEO can', async () => {
+    // Seed a profile directly (skipping account creation, which needs real auth) to test the role-change endpoint for real.
+    // SPARE_CEO is seeded in fixtures.sql (both auth.users and profiles) specifically for this test —
+    // profiles.id has a foreign key to auth.users, which the test client can't insert into itself
+    // (PostgREST here only exposes the public schema; see pg.conf's db-schemas setting).
+    const seeded = SPARE_CEO
+    const byManager = await call(H.userById.PATCH, { as: MANAGER, method: 'PATCH', body: { role_key: 'team' }, params: { id: seeded } })
+    assert.equal(byManager.status, 403, 'Manager cannot demote a CEO')
+    const byCeo = await call(H.userById.PATCH, { as: CEO, method: 'PATCH', body: { role_key: 'team' }, params: { id: seeded } })
+    assert.equal(byCeo.status, 200, JSON.stringify(byCeo.json))
+    assert.equal(await count('audit_events', { entity_id: seeded, action: 'user_role_changed' }), 1)
+  })
+  await step('self password-change also needs no admin permission, just a signed-in session', async () => {
+    const refused = await call(H.changePw.POST, { method: 'POST', body: { new_password: 'whatever123' } }) // no 'as' — not signed in
+    assert.equal(refused.status, 401, 'unauthenticated is refused, but not because of a permission check')
+    const tooShort = await call(H.changePw.POST, { as: TEAM, method: 'POST', body: { new_password: 'short' } })
+    assert.equal(tooShort.status, 400)
+    // Not asserting 200 here: that final step calls auth.admin.updateUserById, which needs real GoTrue.
   })
 
   console.log('\nOther guards and workflows')
