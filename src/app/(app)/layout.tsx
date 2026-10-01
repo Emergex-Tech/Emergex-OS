@@ -10,6 +10,7 @@ const NAV = [
   { href: '/vendors', label: 'Vendors' },
   { href: '/brands', label: 'Brands & Routes' },
   { href: '/proposals', label: 'Proposals' },
+  { href: '/pipeline', label: 'Pipeline' },
   { href: '/intel', label: 'Intel' },
   { href: '/capture', label: 'Capture' },
   { href: '/import', label: 'Import' },
@@ -17,6 +18,8 @@ const NAV = [
   { href: '/search', label: 'Search' }
 ]
 const MANAGEMENT_ROLES = ['manager', 'ceo', 'management']
+// ceo_view.access is held only by CEO (and legacy 'management') — NOT Manager, per the additive role design in 002_stage2a_role_split.sql.
+const CEO_VIEW_ROLES = ['ceo', 'management']
 
 export default function AppLayout({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
@@ -66,7 +69,11 @@ select '${who.id}', id, '${who.email}', '${who.email}', 'ceo' from org;`}</pre>
     )
   }
 
-  const nav = MANAGEMENT_ROLES.includes(role ?? '') ? [...NAV, { href: '/users', label: 'Users' }] : NAV
+  const nav = [
+    ...NAV,
+    ...(CEO_VIEW_ROLES.includes(role ?? '') ? [{ href: '/ceo-view', label: 'CEO View' }] : []),
+    ...(MANAGEMENT_ROLES.includes(role ?? '') ? [{ href: '/users', label: 'Users' }] : [])
+  ]
 
   return (
     <div className="grid grid-cols-[212px_1fr] min-h-screen">

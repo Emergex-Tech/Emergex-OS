@@ -77,6 +77,7 @@ async function main() {
     properties: await load('properties'), items: await load('items'), prices: await load('price-records'), confirm: await load('confirmations'),
     proposals: await load('proposals'), proposal: await load('proposals/[id]'), lines: await load('proposals/[id]/lines'),
     margin: await load('proposals/[id]/lines/[lineId]/margin'), negotiated: await load('proposals/[id]/lines/[lineId]/negotiated-price'),
+    lineConfirm: await load('proposals/[id]/lines/[lineId]/confirm'),
     stage: await load('proposals/[id]/stage'), exportH: await load('proposals/[id]/export'), versions: await load('proposals/[id]/versions'),
     conflicts: await load('proposals/[id]/conflicts'), shareOv: await load('proposals/[id]/share-overrides'),
     ovQueue: await load('share-overrides'), ovApprove: await load('share-overrides/[id]/approve'),
@@ -85,7 +86,8 @@ async function main() {
     overrideApprove: await load('overrides/[id]/approve'), scoreChanges: await load('route-score-changes'),
     scoreApprove: await load('route-score-changes/[id]/approve'), intel: await load('intel-notes'), health: await load('health'),
     users: await load('users'), userById: await load('users/[id]'), userDisable: await load('users/[id]/disable'),
-    userEnable: await load('users/[id]/enable'), userResetPw: await load('users/[id]/reset-password'), changePw: await load('account/change-password')
+    userEnable: await load('users/[id]/enable'), userResetPw: await load('users/[id]/reset-password'), changePw: await load('account/change-password'),
+    pipeline: await load('pipeline'), wonLost: await load('analytics/won-lost'), ceoView: await load('ceo-view')
   }
 
   const S: Record<string, string> = {}
@@ -295,6 +297,76 @@ async function main() {
     await call(H.prices.POST, { as: TEAM, method: 'POST', body: { item_id: i2.json.id, type: 'rack', amount: 1000, currency: 'EUR' } })
     const r = await call(H.lines.POST, { as: TEAM, method: 'POST', body: { item_id: i2.json.id }, params: { id: S.prop1 } })
     assert.equal(r.status, 400); assert.match(r.json.error, /EUR.*USD/)
+  })
+  await step('A26/A30: Sent moves the item to proposed; Won writes a transacted price and sells it; both are idempotent', async () => {
+    // A fresh item/proposal, isolated from S.item's messier history elsewhere, so "available -> proposed -> sold" is unambiguous.
+    const item = await call(H.items.POST, { as: TEAM, method: 'POST', body: { property_id: S.prop, name: 'A26 test item' } }); S.a26item = item.json.id
+    await call(H.prices.POST, { as: TEAM, method: 'POST', body: { item_id: S.a26item, type: 'rack', amount: 10000, currency: 'USD' } })
+    const p = await call(H.proposals.POST, { as: TEAM, method: 'POST', body: { brand_id: S.Blitz, route_id: S.rBlitz } }); const propId = p.json.id
+    const l = await call(H.lines.POST, { as: TEAM, method: 'POST', body: { item_id: S.a26item }, params: { id: propId } })
+    await call(H.margin.PATCH, { as: MANAGER, method: 'PATCH', body: { rate: 20 }, params: { id: propId, lineId: l.json.id } })
+    assert.equal((await call(H.stage.PATCH, { as: MANAGER, method: 'PATCH', body: { to_stage: 'Approved' }, params: { id: propId } })).status, 200)
+
+    const beforeSend = await svc.from('items').select('availability').eq('id', S.a26item).single()
+    assert.equal(beforeSend.data!.availability, 'available')
+    assert.equal((await call(H.stage.PATCH, { as: MANAGER, method: 'PATCH', body: { to_stage: 'Sent' }, params: { id: propId } })).status, 200)
+    assert.equal((await svc.from('items').select('availability').eq('id', S.a26item).single()).data!.availability, 'proposed', 'A26: Sent moves it out of available')
+
+    assert.equal((await call(H.stage.PATCH, { as: MANAGER, method: 'PATCH', body: { to_stage: 'Won' }, params: { id: propId } })).status, 200)
+    assert.equal((await svc.from('items').select('availability').eq('id', S.a26item).single()).data!.availability, 'sold', 'Won sells it')
+    const transacted = await svc.from('price_records').select('amount, brand_id, route_id, proposal_id').eq('item_id', S.a26item).eq('type', 'transacted').single()
+    assert.equal(Number(transacted.data!.amount), 10000, 'A30: writes back the COST used (the rack rate), not the margin-adjusted sell price')
+    assert.equal(transacted.data!.brand_id, S.Blitz); assert.equal(transacted.data!.proposal_id, propId)
+
+    // Idempotent: calling Won again must not create a second transacted record or error out.
+    assert.equal((await call(H.stage.PATCH, { as: MANAGER, method: 'PATCH', body: { to_stage: 'Won' }, params: { id: propId } })).status, 200)
+    assert.equal(await count('price_records', { item_id: S.a26item, type: 'transacted' }), 1, 'the unique index prevented a duplicate')
+
+    // This transacted record should now outrank the rack rate as the best valid cost for next time.
+    const nextLine = await call(H.lines.POST, { as: TEAM, method: 'POST', body: { item_id: S.a26item }, params: { id: S.propK } })
+    assert.equal(nextLine.status, 201, JSON.stringify(nextLine.json))
+    const check = await call(H.proposal.GET, { as: MANAGER, params: { id: S.propK } })
+    const addedLine = check.json.lines.find((l: { item_id: string }) => l.item_id === S.a26item)
+    assert.equal(Number(addedLine.pricing.cost_used), 10000, 'transacted (10,000) still wins here since it equals the rack rate — the real proof is the TYPE used, checked next')
+    assert.equal((await svc.from('price_records').select('type').eq('id', (await svc.from('proposal_line_pricing').select('cost_source_price_record_id').eq('proposal_line_id', addedLine.id).single()).data!.cost_source_price_record_id).single()).data!.type, 'transacted', 'bestValidCost chose the transacted record specifically, not the rack record, even though both equal 10,000')
+  })
+  await step('A27 pipeline: everyone sees value, only margin.view holders see net_margin_pct (D10 again)', async () => {
+    const asTeam = await call(H.pipeline.GET, { as: TEAM })
+    assert.equal(asTeam.status, 200, JSON.stringify(asTeam.json))
+    assert.ok(asTeam.json.length > 0)
+    assert.ok(asTeam.json.every((p: { net_margin_pct: number | null }) => p.net_margin_pct === null), 'Team gets value but never net_margin_pct')
+    const asManager = await call(H.pipeline.GET, { as: MANAGER })
+    const won = asManager.json.find((p: { stage: string; net_margin_pct: number | null }) => p.stage === 'Won')
+    assert.ok(won && won.net_margin_pct != null, 'Manager sees net_margin_pct')
+  })
+  await step('A28 won/lost analysis: shape is correct and a known Won deal shows up under its brand', async () => {
+    const r = await call(H.wonLost.GET, { as: TEAM })
+    assert.equal(r.status, 200, JSON.stringify(r.json))
+    for (const key of ['by_brand', 'by_agent', 'by_market', 'by_category', 'by_reason']) assert.ok(Array.isArray(r.json[key]), `${key} is an array`)
+    const blitzRow = r.json.by_brand.find((b: { key: string }) => b.key === 'Blitz')
+    assert.ok(blitzRow && blitzRow.won >= 1, 'the A26/A30 Won deal counts toward Blitz')
+  })
+  await step('A32/A33 CEO view: refused for Team AND Manager (ceo_view.access is CEO-only), works for CEO with all four sections present', async () => {
+    assert.equal((await call(H.ceoView.GET, { as: TEAM })).status, 403)
+    assert.equal((await call(H.ceoView.GET, { as: MANAGER })).status, 403, 'Manager does not hold ceo_view.access — only CEO does')
+    const r = await call(H.ceoView.GET, { as: CEO })
+    assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.ok(r.json.inventory.total_value > 0)
+    assert.ok(Array.isArray(r.json.pipeline_by_stage) && r.json.pipeline_by_stage.length > 0)
+    assert.ok(Array.isArray(r.json.pricing.signoff_queue))
+    assert.ok(Array.isArray(r.json.team.recent_activity) && r.json.team.recent_activity.length > 0)
+  })
+  await step('A32 sign-off queue: a line Manager priced appears; after CEO confirms it, it drops off', async () => {
+    const before = (await call(H.ceoView.GET, { as: CEO })).json.pricing.signoff_queue
+    const target = before.find((l: { proposal_id: string }) => l.proposal_id === S.prop1)
+    assert.ok(target, 'the Manager-priced line on prop1 is awaiting CEO sign-off')
+
+    const confirmed = await call(H.lineConfirm.PATCH, { as: CEO, method: 'PATCH', body: {}, params: { id: S.prop1, lineId: S.line1 } })
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.json))
+    assert.equal(confirmed.json.action, 'confirmed')
+
+    const after = (await call(H.ceoView.GET, { as: CEO })).json.pricing.signoff_queue
+    assert.ok(!after.some((l: { line_id: string }) => l.line_id === S.line1), 'confirmed line no longer appears in the queue')
   })
   await step('Lost needs a reason; Won creates exactly one deal even if called twice', async () => {
     assert.equal((await call(H.stage.PATCH, { as: MANAGER, method: 'PATCH', body: { to_stage: 'Lost' }, params: { id: S.prop1 } })).status, 400)
