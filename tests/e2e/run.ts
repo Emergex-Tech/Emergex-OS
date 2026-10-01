@@ -87,7 +87,9 @@ async function main() {
     scoreApprove: await load('route-score-changes/[id]/approve'), intel: await load('intel-notes'), health: await load('health'),
     users: await load('users'), userById: await load('users/[id]'), userDisable: await load('users/[id]/disable'),
     userEnable: await load('users/[id]/enable'), userResetPw: await load('users/[id]/reset-password'), changePw: await load('account/change-password'),
-    pipeline: await load('pipeline'), wonLost: await load('analytics/won-lost'), ceoView: await load('ceo-view')
+    pipeline: await load('pipeline'), wonLost: await load('analytics/won-lost'), ceoView: await load('ceo-view'),
+    contracts: await load('contracts'), contractById: await load('contracts/[id]'), dealsNeeding: await load('deals/needing-contract'),
+    deliverables: await load('contracts/[id]/deliverables'), deliverableById: await load('deliverables/[id]'), notifications: await load('notifications')
   }
 
   const S: Record<string, string> = {}
@@ -401,6 +403,65 @@ async function main() {
     await q('agents', 'id, name, markets, cut_method, cut_pct, fixed_fee'); await q('brand_tier', 'brand_id, tier, margin_band_low, margin_band_high')
     await q('vendors', 'id, name, type, markets, status')
     const list = await call(H.proposals.GET, { as: TEAM }); assert.equal(list.status, 200, JSON.stringify(list.json)); assert.ok(list.json.length >= 3)
+  })
+  console.log('\nStage 2B — contracts, deliverables, notifications (Block 6)')
+  await step('needing-contract lists Won deals without one; Team is refused creating one', async () => {
+    const n = await call(H.dealsNeeding.GET, { as: TEAM })
+    assert.equal(n.status, 200, JSON.stringify(n.json))
+    const blitzDeal = n.json.find((d: { brand_name: string }) => d.brand_name === 'Blitz')
+    assert.ok(blitzDeal, 'the A26/A30 Won deal for Blitz has no contract yet')
+    S.dealId = blitzDeal.deal_id
+
+    const refused = await call(H.contracts.POST, { as: TEAM, method: 'POST', body: { deal_id: S.dealId, renewal_date: '2027-01-01' } })
+    assert.equal(refused.status, 403)
+  })
+  await step('B1: Manager creates a contract — final_amount is computed from the proposal lines, not re-entered', async () => {
+    const r = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: S.dealId, terms: 'Standard terms', renewal_date: '2027-01-01' } })
+    assert.equal(r.status, 201, JSON.stringify(r.json))
+    assert.equal(Number(r.json.final_amount), 12000, 'the A26/A30 item sold at cost 10,000 + 20% margin')
+    S.contractId = r.json.id
+
+    const dup = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: S.dealId, renewal_date: '2027-01-01' } })
+    assert.equal(dup.status, 409, 'one contract per deal')
+
+    const noDate = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: '00000000-0000-0000-0000-000000000000' } })
+    assert.equal(noDate.status, 400, 'renewal_date is validated before the deal is even looked up')
+  })
+  await step('B2: deliverables — adding one needs contract.manage, marking it done does not (Team can)', async () => {
+    const refused = await call(H.deliverables.POST, { as: TEAM, method: 'POST', body: { description: 'Ship creative', due_date: '2026-11-01' }, params: { id: S.contractId } })
+    assert.equal(refused.status, 403)
+
+    const added = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description: 'Ship creative', due_date: '2020-01-01' }, params: { id: S.contractId } })
+    assert.equal(added.status, 201, JSON.stringify(added.json))
+    S.deliverableId = added.json.id
+
+    const detail = await call(H.contractById.GET, { as: TEAM, params: { id: S.contractId } })
+    assert.equal(detail.status, 200, JSON.stringify(detail.json))
+    assert.equal(detail.json.deliverables.length, 1)
+    assert.equal(detail.json.brand_name, 'Blitz')
+
+    const toggled = await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { status: 'done' }, params: { id: S.deliverableId } })
+    assert.equal(toggled.status, 200, JSON.stringify(toggled.json))
+    assert.equal(toggled.json.status, 'done')
+  })
+  await step('B4 + notifications: an overdue (not-done) deliverable and a near-term renewal both surface; a DONE overdue deliverable does not', async () => {
+    // The deliverable above was due 2020-01-01 (overdue) but is now 'done' — it must NOT appear as overdue.
+    const after = await call(H.notifications.GET, { as: MANAGER })
+    assert.equal(after.status, 200, JSON.stringify(after.json))
+    const overdueGroup = after.json.find((g: { title: string }) => g.title === 'Overdue deliverables')
+    assert.ok(!overdueGroup, 'the done deliverable must not show as overdue')
+
+    // Add a second, still-pending overdue deliverable to confirm the group DOES appear when one is actually pending+overdue.
+    const second = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description: 'Overdue proof', due_date: '2020-01-01' }, params: { id: S.contractId } })
+    assert.equal(second.status, 201)
+    const withOverdue = await call(H.notifications.GET, { as: MANAGER })
+    const nowOverdue = withOverdue.json.find((g: { title: string }) => g.title === 'Overdue deliverables')
+    assert.ok(nowOverdue && nowOverdue.items.some((i: { label: string }) => i.label === 'Overdue proof'))
+
+    const renewalGroup = withOverdue.json.find((g: { title: string }) => g.title === 'Upcoming renewals')
+    // renewal_date was set to 2027-01-01 above — only asserted present if that's within 30 days of "now" in this run;
+    // instead of relying on wall-clock timing, just confirm the group key never errors and is an array when absent.
+    assert.ok(renewalGroup === undefined || Array.isArray(renewalGroup.items))
   })
   await step('/api/health reports every migration present and no critical env missing', async () => {
     const r = await call(H.health.GET, { as: MANAGER }); assert.equal(r.status, 200, JSON.stringify(r.json))

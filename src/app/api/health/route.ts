@@ -55,6 +55,8 @@ export async function GET(req: NextRequest) {
   await probe('migration 005: export files', 'files', 'kind, proposal_version_id')
   await probe('migration 006: competitor links', 'competitor_links', 'id, a_type, b_type')
   await probe('migration 006: share overrides', 'share_conflict_overrides', 'id, status')
+  await probe('migration 009: contracts', 'contracts', 'id, deal_id, renewal_date, final_amount')
+  await probe('migration 009: deliverables', 'deliverables', 'id, contract_id, status')
 
   const roles = await svc.from('roles').select('key').in('key', ['team', 'manager', 'ceo'])
   checks.push({ name: 'migration 002: manager + ceo roles exist', ok: (roles.data?.length ?? 0) === 3, detail: roles.error?.message })
