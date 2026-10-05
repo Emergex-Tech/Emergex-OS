@@ -6,7 +6,8 @@ import { errorResponse } from '@/lib/apiError'
 /** Self-service — anyone can change their OWN password (no user.manage needed; requirePermission is deliberately not called here). */
 export async function POST(req: NextRequest) {
   try {
-    const profile = await requireProfile()
+    // One of the very few routes an EXTERNAL user may call: it only ever changes the caller's OWN password (profile.id), never another user's.
+    const profile = await requireProfile({ allowExternal: true })
     const body = await req.json()
     if (typeof body.new_password !== 'string' || body.new_password.length < 8) {
       throw new ApiError(400, 'New password must be at least 8 characters')

@@ -2,6 +2,8 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { supabaseBrowser } from '@/lib/supabaseBrowser'
+import ContractFinance from '@/components/ContractFinance'
+import ContractFiles from '@/components/ContractFiles'
 
 interface Deliverable { id: string; description: string; due_date: string | null; status: string; owner_name: string | null }
 interface ContractDetail { id: string; brand_name: string; terms: string | null; final_amount: number; currency: string; renewal_date: string | null; status: string; deliverables: Deliverable[] }
@@ -95,6 +97,8 @@ export default function ContractDetail() {
           </div>
         </div>
       )}
+      {canManage && <ContractFiles contractId={contract.id} />}
+      {canManage && <ContractFinance contractId={contract.id} />}
     </div>
   )
 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { supabaseService } from '@/lib/supabaseServer'
 import { requireProfile } from '@/lib/auth'
 import { checkDriveAccess } from '@/lib/googleDrive'
+import { agentAccessEnabled } from '@/lib/agentAccess'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 30
@@ -57,6 +58,15 @@ export async function GET(req: NextRequest) {
   await probe('migration 006: share overrides', 'share_conflict_overrides', 'id, status')
   await probe('migration 009: contracts', 'contracts', 'id, deal_id, renewal_date, final_amount')
   await probe('migration 009: deliverables', 'deliverables', 'id, contract_id, status')
+  await probe('migration 010: invoices', 'invoices', 'id, seq_no, direction, amount, status')
+  await probe('migration 010: payments', 'payments', 'id, invoice_id, amount')
+  await probe('migration 010: invoice chases', 'invoice_chases', 'id, invoice_id')
+  await probe('migration 011: agent grants', 'shareable_grants', 'id, agent_id, item_id, revoked_at')
+  await probe('migration 011: agent activity log', 'agent_activity', 'id, agent_id, action')
+  await probe('migration 011: agent users + contract files', 'profiles', 'agent_id')
+  await probe('migration 011: contract file versions', 'files', 'doc_title, sha256, size_bytes')
+  const agentRole = await svc.from('roles').select('key, is_external').eq('key', 'agent').maybeSingle()
+  checks.push({ name: 'migration 011: agent role exists and is marked external', ok: agentRole.data?.is_external === true, detail: agentRole.error?.message })
 
   const roles = await svc.from('roles').select('key').in('key', ['team', 'manager', 'ceo'])
   checks.push({ name: 'migration 002: manager + ceo roles exist', ok: (roles.data?.length ?? 0) === 3, detail: roles.error?.message })
@@ -94,6 +104,7 @@ export async function GET(req: NextRequest) {
     ready: criticalEnv && checks.every((c) => c.ok),
     env, envHint, checks, session, drive,
     optional: {
+      agent_portal: agentAccessEnabled() ? 'ENABLED — agents can use the portal' : 'disabled (AGENT_ACCESS_ENABLED is not set). Agent accounts can be created, but cannot use any data route. Enable only after your security review.',
       capture_ai: env.ANTHROPIC_API_KEY ? 'configured' : 'ANTHROPIC_API_KEY missing — Capture will not work',
       drive: env.GOOGLE_SERVICE_ACCOUNT_KEY && env.GOOGLE_SHARED_DRIVE_ID ? 'configured (add ?deep=1 to test access)' : 'not configured — records and exports still work, files just are not filed in Drive'
     }

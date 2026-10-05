@@ -5,7 +5,7 @@ import { supabaseService } from '@/lib/supabaseServer'
 import { findUnpricedLines } from '@/lib/proposalGate'
 import { getOrCreateVersion } from '@/lib/proposalVersions'
 import { buildProposalWorkbook, type ExportData } from '@/lib/proposalExcel'
-import { uploadFileToFolder } from '@/lib/googleDrive'
+import { driveImpl } from '@/lib/googleDrive'
 import { proposalFolderName, safeFilePart } from '@/lib/naming'
 import { checkConflicts, findUsableOverride, summarizeConflicts, type Conflict } from '@/lib/conflicts'
 import { errorResponse } from '@/lib/apiError'
@@ -133,7 +133,7 @@ export async function POST(_req: NextRequest, { params }: { params: { id: string
         folderName: proposalFolderName(brandName, proposal.created_at, params.id)
       })
       if (!folderId) throw new Error('Could not create or find the proposal folder (is Google Drive configured?)')
-      const uploaded = await uploadFileToFolder({ folderId, name: filename, mimeType: XLSX_MIME, content: buffer })
+      const uploaded = await driveImpl.uploadFileToFolder({ folderId, name: filename, mimeType: XLSX_MIME, content: buffer })
 
       await svc.from('files').update({ is_current: false })
         .eq('org_id', profile.org_id).eq('linked_type', 'proposal').eq('linked_id', params.id).eq('kind', 'proposal_export')

@@ -1,10 +1,12 @@
-export type RoleKey = 'team' | 'management' | 'manager' | 'ceo' // 'management' is legacy — see migrations/002_stage2a_role_split.sql. Stage 2B adds 'agent', Stage 4 adds 'brand'
+export type RoleKey = 'team' | 'management' | 'manager' | 'ceo' | 'agent' // 'management' is legacy — see migrations/002_stage2a_role_split.sql. Stage 2B adds 'agent', Stage 4 adds 'brand'
 
 export interface Profile {
   id: string
   org_id: string
   full_name: string | null
   role_key: RoleKey
+  agent_id: string | null   // set only for role 'agent': which agent company this user belongs to
+  is_external: boolean      // true for roles outside the company (agents). Everything defaults to refusing these.
 }
 
 export interface Category {

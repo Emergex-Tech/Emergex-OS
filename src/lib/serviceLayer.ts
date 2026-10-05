@@ -1,6 +1,6 @@
 import { supabaseService } from './supabaseServer'
 import { ApiError } from './auth'
-import { createRecordFolder } from './googleDrive'
+import { driveImpl } from './googleDrive'
 import type { Profile } from '@/types/db'
 
 /**
@@ -130,7 +130,7 @@ export async function findFolderId(orgId: string, entityType: string, entityId: 
 
 /** Finds the record's folder, creating it (best effort) if missing. Null means Drive isn't usable right now. */
 export async function ensureFolderId(params: {
-  orgId: string; actorId: string; entityType: 'proposal'; entityId: string; folderName: string
+  orgId: string; actorId: string; entityType: 'proposal' | 'contract'; entityId: string; folderName: string
 }): Promise<string | null> {
   const found = await findFolderId(params.orgId, params.entityType, params.entityId)
   if (found) return found
@@ -148,7 +148,7 @@ export async function ensureFolderId(params: {
 export async function tryCreateDriveFolder(params: {
   orgId: string
   actorId: string
-  entityType: 'vendor' | 'brand' | 'agent' | 'property' | 'proposal'
+  entityType: 'vendor' | 'brand' | 'agent' | 'property' | 'proposal' | 'contract'
   entityId: string
   folderName: string
 }) {
@@ -157,7 +157,7 @@ export async function tryCreateDriveFolder(params: {
     // Idempotent: a retry must not create a second folder row for the same record.
     const existing = await findFolderId(params.orgId, params.entityType, params.entityId)
     if (existing) return
-    const { folderId, folderUrl } = await createRecordFolder({ entityType: params.entityType, folderName: params.folderName })
+    const { folderId, folderUrl } = await driveImpl.createRecordFolder({ entityType: params.entityType, folderName: params.folderName })
     await svc.from('files').insert({
       org_id: params.orgId,
       linked_type: params.entityType,

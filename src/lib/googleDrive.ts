@@ -110,3 +110,18 @@ export async function checkDriveAccess(): Promise<{ ok: boolean; detail: string 
     return { ok: false, detail: e instanceof Error ? e.message : String(e) }
   }
 }
+
+/** Reads a file's bytes through the service account, so nobody needs Drive access of their own to download one. */
+export async function downloadFile(fileId: string): Promise<Buffer> {
+  const drive = driveClient()
+  const res = await drive.files.get({ fileId, alt: 'media', supportsAllDrives: true }, { responseType: 'arraybuffer' })
+  return Buffer.from(res.data as unknown as ArrayBuffer)
+}
+
+/**
+ * Every Drive operation the app performs goes through this object, so tests can swap in an in-memory
+ * fake (see tests/e2e/run.ts). Production never reassigns it. This is injection, not a "fake mode"
+ * switched on by an environment variable — a misconfigured production must never be able to store
+ * contracts somewhere other than the real Shared Drive.
+ */
+export const driveImpl = { createRecordFolder, uploadFileToFolder, downloadFile }

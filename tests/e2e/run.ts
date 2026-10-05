@@ -9,6 +9,10 @@ import { NextRequest } from 'next/server'
 const TEAM = '11111111-0000-0000-0000-000000000001'
 const MANAGER = '22222222-0000-0000-0000-000000000002'
 const CEO = '33333333-0000-0000-0000-000000000003'
+const AGENT_A = '66666666-0000-0000-0000-000000000006'
+const AGENT_B = '77777777-0000-0000-0000-000000000007'
+const CO_A = 'a0a0a0a0-0000-0000-0000-00000000000a'
+const CO_B = 'b0b0b0b0-0000-0000-0000-00000000000b'
 const SPARE_CEO = '55555555-0000-0000-0000-000000000005' // for the "only a CEO can demote a CEO" test — see fixtures.sql
 const POSTGREST = process.env.POSTGREST_URL ?? 'http://127.0.0.1:3000'
 const SECRET = process.env.JWT_SECRET ?? 'e2e-secret-e2e-secret-e2e-secret-1234'
@@ -22,6 +26,7 @@ process.env.SUPABASE_URL = `http://127.0.0.1:${PROXY_PORT}`
 process.env.NEXT_PUBLIC_SUPABASE_URL = `http://127.0.0.1:${PROXY_PORT}`
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'unused'
 process.env.SUPABASE_SERVICE_ROLE_KEY = serviceJwt
+process.env.AGENT_ACCESS_ENABLED = '1' // the portal is released for these tests; one test switches it off to prove the kill switch
 delete process.env.GOOGLE_SERVICE_ACCOUNT_KEY // Drive is deliberately unconfigured: exercises the "Drive failed, export still works" path
 delete process.env.ANTHROPIC_API_KEY
 
@@ -44,10 +49,11 @@ const proxy = http.createServer((req, res) => {
 type Handler = (req: NextRequest, ctx: { params: any }) => Promise<Response>
 const load = async (path: string): Promise<Record<string, Handler>> => import(`../../src/app/api/${path}/route`)
 
-async function call(handler: Handler, o: { as?: string; method?: string; query?: string; body?: unknown; params?: Record<string, string> } = {}) {
+async function call(handler: Handler, o: { as?: string; method?: string; query?: string; body?: unknown; form?: FormData; params?: Record<string, string> } = {}) {
   ;(globalThis as any).__TEST_USER__ = o.as ?? null
   const init: any = { method: o.method ?? 'GET' }
   if (o.body !== undefined) { init.body = JSON.stringify(o.body); init.headers = { 'content-type': 'application/json' } }
+  if (o.form) init.body = o.form
   const res = await handler(new NextRequest(`http://localhost/api/x${o.query ?? ''}`, init), { params: o.params ?? {} })
   const json = (res.headers.get('content-type') ?? '').includes('json') ? await res.json() : null
   return { status: res.status, json, res }
@@ -89,10 +95,18 @@ async function main() {
     userEnable: await load('users/[id]/enable'), userResetPw: await load('users/[id]/reset-password'), changePw: await load('account/change-password'),
     pipeline: await load('pipeline'), wonLost: await load('analytics/won-lost'), ceoView: await load('ceo-view'),
     contracts: await load('contracts'), contractById: await load('contracts/[id]'), dealsNeeding: await load('deals/needing-contract'),
-    deliverables: await load('contracts/[id]/deliverables'), deliverableById: await load('deliverables/[id]'), notifications: await load('notifications')
+    deliverables: await load('contracts/[id]/deliverables'), deliverableById: await load('deliverables/[id]'), notifications: await load('notifications'),
+    invoices: await load('invoices'), invoiceById: await load('invoices/[id]'), invoicePayments: await load('invoices/[id]/payments'),
+    invoiceChase: await load('invoices/[id]/chase'), schedule: await load('contracts/[id]/billing-schedule'), payables: await load('contracts/[id]/payables'),
+    overdue: await load('finance/overdue'), financeExport: await load('finance/export'),
+    agentMe: await load('agent/me'), agentItems: await load('agent/items'), agentItem: await load('agent/items/[id]'), agentIntel: await load('agent/intel'),
+    agentsList: await load('agent-access/agents'), grants: await load('agent-access/grants'), grantById: await load('agent-access/grants/[id]'),
+    activity: await load('agent-access/activity'), intelQueue: await load('agent-access/intel'), intelReview: await load('agent-access/intel/[id]/review'),
+    files: await load('contracts/[id]/files'), fileById: await load('contracts/[id]/files/[fileId]'), changePw2: await load('account/change-password')
   }
 
   const S: Record<string, string> = {}
+  S.orgId = (await svc.from('profiles').select('org_id').eq('id', TEAM).single()).data!.org_id
 
   console.log('\nStage 1 — records')
   await step('Team creates a vendor (createRecord no longer forces a missing created_by column)', async () => {
@@ -462,6 +476,458 @@ async function main() {
     // renewal_date was set to 2027-01-01 above — only asserted present if that's within 30 days of "now" in this run;
     // instead of relying on wall-clock timing, just confirm the group key never errors and is an array when absent.
     assert.ok(renewalGroup === undefined || Array.isArray(renewalGroup.items))
+  })
+  console.log('\nStage 2B — finance (B6–B11)')
+  const NIL = '00000000-0000-0000-0000-000000000000'
+  await step('Team is refused on EVERY finance endpoint (403, before anything is even looked up)', async () => {
+    const attempts: [string, number][] = [
+      ['GET invoices', (await call(H.invoices.GET, { as: TEAM })).status],
+      ['GET invoice', (await call(H.invoiceById.GET, { as: TEAM, params: { id: NIL } })).status],
+      ['PATCH invoice', (await call(H.invoiceById.PATCH, { as: TEAM, method: 'PATCH', body: { action: 'issue' }, params: { id: NIL } })).status],
+      ['POST schedule', (await call(H.schedule.POST, { as: TEAM, method: 'POST', body: { first_due_date: '2026-01-01' }, params: { id: S.contractId } })).status],
+      ['POST payables', (await call(H.payables.POST, { as: TEAM, method: 'POST', params: { id: S.contractId } })).status],
+      ['POST payment', (await call(H.invoicePayments.POST, { as: TEAM, method: 'POST', body: { amount: 1 }, params: { id: NIL } })).status],
+      ['POST chase', (await call(H.invoiceChase.POST, { as: TEAM, method: 'POST', params: { id: NIL } })).status],
+      ['GET overdue', (await call(H.overdue.GET, { as: TEAM })).status],
+      ['GET export', (await call(H.financeExport.GET, { as: TEAM, query: '?kind=receivables' })).status]
+    ]
+    for (const [name, status] of attempts) assert.equal(status, 403, `${name} returned ${status}`)
+  })
+  await step('B6: bad schedules are refused and leave nothing behind', async () => {
+    for (const body of [{ installments: 0, first_due_date: '2026-01-01' }, { installments: 3 }, { installments: 3, first_due_date: '2026-02-30' }, { installments: 3, first_due_date: '2026-01-01', interval_months: 13 }]) {
+      assert.equal((await call(H.schedule.POST, { as: MANAGER, method: 'POST', body, params: { id: S.contractId } })).status, 400, JSON.stringify(body))
+    }
+    assert.equal((await call(H.schedule.POST, { as: MANAGER, method: 'POST', body: { first_due_date: '2026-01-01' }, params: { id: NIL } })).status, 404)
+    assert.equal(await count('invoices', { contract_id: S.contractId }), 0)
+  })
+  await step('B6/B7: a 3-instalment schedule sums to exactly the contract total, on month-end dates (2020 is a leap year); a second one is refused', async () => {
+    const r = await call(H.schedule.POST, { as: MANAGER, method: 'POST', body: { installments: 3, first_due_date: '2020-01-31', interval_months: 1 }, params: { id: S.contractId } })
+    assert.equal(r.status, 201, JSON.stringify(r.json))
+    const inv = [...r.json.invoices].sort((a: any, b: any) => a.due_date.localeCompare(b.due_date))
+    assert.deepEqual(inv.map((i: any) => i.amount), [4000, 4000, 4000])
+    assert.deepEqual(inv.map((i: any) => i.due_date), ['2020-01-31', '2020-02-29', '2020-03-31'])
+    assert.ok(inv.every((i: any) => /^INV-\d{5}$/.test(i.number)))
+    ;[S.inv1, S.inv2, S.inv3] = inv.map((i: any) => i.id)
+    const dup = await call(H.schedule.POST, { as: MANAGER, method: 'POST', body: { installments: 2, first_due_date: '2026-01-01' }, params: { id: S.contractId } })
+    assert.equal(dup.status, 409); assert.equal(await count('invoices', { contract_id: S.contractId }), 3, 'the refused request created nothing')
+    const list = await call(H.invoices.GET, { as: MANAGER, query: `?direction=receivable&contract_id=${S.contractId}` })
+    assert.equal(list.json.length, 3); assert.ok(list.json.every((i: any) => i.status === 'draft' && i.balance === 4000 && !i.overdue), 'drafts are never overdue')
+  })
+  await step('B9: payments — refused on a draft; partial then full; an overpayment is refused and writes nothing; a paid invoice cannot be voided', async () => {
+    const onDraft = await call(H.invoicePayments.POST, { as: MANAGER, method: 'POST', body: { amount: 100 }, params: { id: S.inv1 } })
+    assert.equal(onDraft.status, 400); assert.match(onDraft.json.error, /issued invoice/)
+    assert.equal((await call(H.invoiceById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'nonsense' }, params: { id: S.inv1 } })).status, 400)
+    const issued = await call(H.invoiceById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'issue' }, params: { id: S.inv1 } })
+    assert.equal(issued.status, 200, JSON.stringify(issued.json)); assert.equal(issued.json.status, 'issued'); assert.ok(issued.json.issue_date)
+    assert.equal((await call(H.invoiceById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'issue' }, params: { id: S.inv1 } })).status, 400, 'cannot issue twice')
+
+    const part = await call(H.invoicePayments.POST, { as: MANAGER, method: 'POST', body: { amount: 1000, method: 'bank transfer', reference: 'TX-1' }, params: { id: S.inv1 } })
+    assert.equal(part.status, 201, JSON.stringify(part.json)); assert.equal(part.json.payment_status, 'part_paid'); assert.equal(part.json.balance, 3000); assert.equal(part.json.paid, 1000)
+    const over = await call(H.invoicePayments.POST, { as: MANAGER, method: 'POST', body: { amount: 5000 }, params: { id: S.inv1 } })
+    assert.equal(over.status, 400); assert.match(over.json.error, /outstanding balance/)
+    assert.equal(await count('payments', { invoice_id: S.inv1 }), 1, 'the refused overpayment wrote nothing')
+    for (const bad of [0, -5, 'abc']) assert.equal((await call(H.invoicePayments.POST, { as: MANAGER, method: 'POST', body: { amount: bad }, params: { id: S.inv1 } })).status, 400)
+
+    const full = await call(H.invoicePayments.POST, { as: MANAGER, method: 'POST', body: { amount: 3000 }, params: { id: S.inv1 } })
+    assert.equal(full.status, 201, JSON.stringify(full.json)); assert.equal(full.json.payment_status, 'paid'); assert.equal(full.json.balance, 0)
+    assert.equal((await call(H.invoicePayments.POST, { as: MANAGER, method: 'POST', body: { amount: 1 }, params: { id: S.inv1 } })).status, 400, 'nothing left to pay')
+    const voidPaid = await call(H.invoiceById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'void' }, params: { id: S.inv1 } })
+    assert.equal(voidPaid.status, 400, JSON.stringify(voidPaid.json)); assert.match(voidPaid.json.error, /cannot be voided/, 'the DATABASE refused it, and its message came through')
+  })
+  await step('B10: overdue list — only issued, unpaid, past-due invoices; a chase is logged and clears the reminder; paid/draft invoices cannot be chased', async () => {
+    assert.equal((await call(H.invoiceById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'issue' }, params: { id: S.inv2 } })).status, 200)
+    const od = await call(H.overdue.GET, { as: MANAGER })
+    assert.equal(od.status, 200, JSON.stringify(od.json))
+    const ids = od.json.map((i: any) => i.id)
+    assert.ok(ids.includes(S.inv2), 'issued, unpaid, due 2020-02-29')
+    assert.ok(!ids.includes(S.inv1), 'fully paid is not overdue'); assert.ok(!ids.includes(S.inv3), 'a draft is not overdue')
+    const row = od.json.find((i: any) => i.id === S.inv2)
+    assert.ok(row.days_overdue > 365); assert.equal(row.needs_chase, true); assert.equal(row.balance, 4000)
+
+    assert.equal((await call(H.invoiceChase.POST, { as: MANAGER, method: 'POST', params: { id: S.inv1 } })).status, 400, 'paid')
+    assert.equal((await call(H.invoiceChase.POST, { as: MANAGER, method: 'POST', params: { id: S.inv3 } })).status, 400, 'draft')
+    const chased = await call(H.invoiceChase.POST, { as: MANAGER, method: 'POST', body: { note: 'Emailed accounts payable' }, params: { id: S.inv2 } })
+    assert.equal(chased.status, 201, JSON.stringify(chased.json)); assert.equal(chased.json.needs_chase, false, 'just chased'); assert.ok(chased.json.last_chased_at)
+    const detail = await call(H.invoiceById.GET, { as: MANAGER, params: { id: S.inv2 } })
+    assert.equal(detail.json.chases.length, 1); assert.equal(detail.json.chases[0].note, 'Emailed accounts payable'); assert.equal(detail.json.chases[0].chased_by.full_name, 'manager user')
+    const paidDetail = await call(H.invoiceById.GET, { as: MANAGER, params: { id: S.inv1 } })
+    assert.equal(paidDetail.json.payments.length, 2); assert.equal(paidDetail.json.payments[0].method, 'bank transfer'); assert.equal(paidDetail.json.payments[0].recorded_by.full_name, 'manager user')
+    assert.equal((await call(H.invoiceById.GET, { as: MANAGER, params: { id: NIL } })).status, 404)
+  })
+  await step('notifications: Manager sees "Overdue invoices"; Team gets NO money information at all', async () => {
+    const m = await call(H.notifications.GET, { as: MANAGER })
+    const g = m.json.find((x: any) => x.title === 'Overdue invoices')
+    assert.ok(g && g.items.some((i: any) => /INV-\d{5}/.test(i.label) && /overdue/.test(i.detail)), JSON.stringify(m.json.map((x: any) => x.title)))
+    const t = await call(H.notifications.GET, { as: TEAM })
+    assert.equal(t.status, 200)
+    assert.ok(!t.json.some((x: any) => /invoice|payable/i.test(x.title)), 'no finance group for Team')
+    assert.ok(!JSON.stringify(t.json).includes('INV-'), 'no invoice number leaks into Team\'s feed anywhere')
+  })
+  await step('B8: payables from a won deal — one per vendor with the real cost; refused to Team; not generated twice', async () => {
+    const r = await call(H.payables.POST, { as: MANAGER, method: 'POST', body: { due_date: '2026-12-31' }, params: { id: S.contractId } })
+    assert.equal(r.status, 201, JSON.stringify(r.json))
+    assert.equal(r.json.payables.length, 1); assert.equal(r.json.payables[0].counterparty, 'Apex Sports Media'); assert.equal(r.json.payables[0].amount, 10000); assert.match(r.json.payables[0].number, /^BILL-\d{5}$/)
+    assert.equal(r.json.warning, null)
+    assert.equal((await call(H.payables.POST, { as: MANAGER, method: 'POST', params: { id: S.contractId } })).status, 409)
+    assert.equal((await call(H.payables.POST, { as: MANAGER, method: 'POST', body: { due_date: 'soon' }, params: { id: NIL } })).status, 400, 'bad due_date is validated first')
+  })
+  await step('B8 with an agent: vendor cost AND the agent\'s commission are payable; the agent can also be the party billed', async () => {
+    const ag = await call(H.agents.POST, { as: MANAGER, method: 'POST', body: { name: 'Payable Agent' } }); const agentId = ag.json.id
+    const agentsRoute = await load('agents/[id]')
+    assert.equal((await call(agentsRoute.PATCH, { as: MANAGER, method: 'PATCH', body: { cut_method: 'onTop', cut_pct: 12, fixed_fee: 0 }, params: { id: agentId } })).status, 200)
+    const route = await call(H.routes.POST, { as: MANAGER, method: 'POST', body: { brand_id: S.Blitz, route_type: 'via_agent', agent_id: agentId, market: 'UAE' } }); assert.equal(route.status, 201, JSON.stringify(route.json))
+    const item = await call(H.items.POST, { as: TEAM, method: 'POST', body: { property_id: S.prop, name: 'Finance chain item' } })
+    await call(H.prices.POST, { as: TEAM, method: 'POST', body: { item_id: item.json.id, type: 'rack', amount: 10000, currency: 'USD' } })
+    const p = await call(H.proposals.POST, { as: TEAM, method: 'POST', body: { brand_id: S.Blitz, route_id: route.json.id } }); const pid = p.json.id
+    const line = await call(H.lines.POST, { as: TEAM, method: 'POST', body: { item_id: item.json.id }, params: { id: pid } })
+    await call(H.margin.PATCH, { as: MANAGER, method: 'PATCH', body: { rate: 20 }, params: { id: pid, lineId: line.json.id } })
+    for (const st of ['Approved', 'Sent', 'Won']) assert.equal((await call(H.stage.PATCH, { as: MANAGER, method: 'PATCH', body: { to_stage: st }, params: { id: pid } })).status, 200, st)
+    const deal = await svc.from('deals').select('id').eq('proposal_id', pid).single()
+    const ctr = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: deal.data!.id, renewal_date: '2027-06-01' } })
+    assert.equal(ctr.status, 201, JSON.stringify(ctr.json)); assert.equal(Number(ctr.json.final_amount), 13440, '10,000 + 20% = 12,000, + 12% on top for the agent = 13,440')
+
+    const pay = await call(H.payables.POST, { as: MANAGER, method: 'POST', params: { id: ctr.json.id } })
+    assert.equal(pay.status, 201, JSON.stringify(pay.json))
+    const byType = Object.fromEntries(pay.json.payables.map((x: any) => [x.type, x]))
+    assert.equal(byType.vendor.amount, 10000); assert.equal(byType.vendor.counterparty, 'Apex Sports Media')
+    assert.equal(byType.agent.amount, 1440, '12% of 12,000'); assert.equal(byType.agent.counterparty, 'Payable Agent')
+
+    const sch = await call(H.schedule.POST, { as: MANAGER, method: 'POST', body: { installments: 2, first_due_date: '2027-01-15', counterparty: { type: 'agent', id: agentId } }, params: { id: ctr.json.id } })
+    assert.equal(sch.status, 201, JSON.stringify(sch.json)); assert.deepEqual(sch.json.invoices.map((i: any) => i.amount), [6720, 6720])
+    const rec = await call(H.invoices.GET, { as: MANAGER, query: `?direction=receivable&contract_id=${ctr.json.id}` })
+    assert.ok(rec.json.every((i: any) => i.counterparty_type === 'agent' && i.counterparty_name === 'Payable Agent'))
+    const badAgent = await call(H.schedule.POST, { as: MANAGER, method: 'POST', body: { first_due_date: '2027-01-15', counterparty: { type: 'agent', id: NIL } }, params: { id: S.contractId } })
+    assert.equal(badAgent.status, 409, 'already has a schedule — refused before the counterparty is even checked')
+  })
+  await step('B11: CSV export — right columns and rows, voided invoices excluded, bad kind refused, and the export is audited', async () => {
+    assert.equal((await call(H.invoiceById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'void' }, params: { id: S.inv3 } })).status, 200, 'an unpaid draft can be voided')
+    const r = await call(H.financeExport.GET, { as: MANAGER, query: '?kind=receivables' })
+    assert.equal(r.status, 200); assert.match(r.res.headers.get('content-type') ?? '', /text\/csv/); assert.match(r.res.headers.get('content-disposition') ?? '', /emergex-receivables-\d{4}-\d{2}-\d{2}\.csv/)
+    const csv = await r.res.text(); const lines = csv.trim().split('\r\n')
+    assert.equal(lines[0], 'Number,Direction,Counterparty type,Counterparty,Description,Currency,Amount,Paid,Balance,Issue date,Due date,Status,Payment status')
+    const inv1 = (await call(H.invoiceById.GET, { as: MANAGER, params: { id: S.inv1 } })).json.number
+    const inv3 = (await call(H.invoiceById.GET, { as: MANAGER, params: { id: S.inv3 } })).json.number
+    assert.ok(csv.includes(inv1) && csv.includes('paid')); assert.ok(!csv.includes(inv3), 'the voided invoice is not exported')
+    assert.ok(!csv.includes('BILL-'), 'receivables export holds no payables')
+    const pay = await (await call(H.financeExport.GET, { as: MANAGER, query: '?kind=payments' })).res.text()
+    assert.ok(pay.startsWith('Invoice,Counterparty,Currency,Amount,Paid on,Method,Reference')); assert.ok(pay.includes('bank transfer') && pay.includes('TX-1'))
+    const bills = await (await call(H.financeExport.GET, { as: MANAGER, query: '?kind=payables' })).res.text()
+    assert.ok(bills.includes('BILL-') && bills.includes('Apex Sports Media') && bills.includes('Payable Agent') && !bills.includes('INV-'))
+    assert.equal((await call(H.financeExport.GET, { as: MANAGER, query: '?kind=everything' })).status, 400)
+    assert.equal((await call(H.financeExport.GET, { as: MANAGER })).status, 400)
+    assert.ok(await count('audit_events', { action: 'finance_exported' }) >= 3)
+  })
+  console.log('\nStage 2B — agent access (B12–B17), B15 access tests, and contract files (B3)')
+  const SENTINELS = ['Apex Sports Media', '77777', 'SECRET-CONTACT-NAME', 'INTERNAL-SENTINEL-TEXT', 'Meridian', 'Payable Agent', 'Agent Co B', 'AGENT-B-NOTE-TEXT', 'Blitz', 'Kingfish', 'Rival']
+  const leaks = (v: unknown) => SENTINELS.filter((x) => JSON.stringify(v).includes(x))
+  const ITEM_KEYS = ['id', 'title', 'category', 'market', 'event_start', 'event_end', 'offer_expiry', 'availability', 'details', 'indicative_price'].sort()
+  const INTEL_KEYS = ['id', 'note', 'submitted_at', 'status', 'claimed_price'].sort()
+  const agentCreds = (u: string) => ({ as: u })
+
+  await step('setup: hostile sentinel data — a vendor, a cost, internal intel, and attributes that name the source', async () => {
+    const mk = async (name: string, attributes: Record<string, unknown>, propertyId = S.prop) => {
+      const r = await call(H.items.POST, { as: TEAM, method: 'POST', body: { property_id: propertyId, name, attributes } }); assert.equal(r.status, 201, JSON.stringify(r.json))
+      await call(H.prices.POST, { as: TEAM, method: 'POST', body: { item_id: r.json.id, type: 'rack', amount: 77777, currency: 'USD' } }); return r.json.id as string
+    }
+    S.G1 = await mk('Agent item one', { asset_type: 'led_perimeter', quantity: 3, vendor_name: 'Apex Sports Media', management_contact: 'SECRET-CONTACT-NAME', cost: 77777 })
+    S.G2 = await mk('Agent item two', { asset_type: 'pitch_mat' })
+    S.G3 = await mk('Agent item three, shared with nobody', {})
+    const p2 = await call(H.properties.POST, { as: TEAM, method: 'POST', body: { name: 'Agent property two', category_key: 'ooh_led', market: 'UAE', vendor_id: S.vendor, attributes: {} } }); S.P2 = p2.json.id
+    S.X1 = await mk('P2 item 1', {}, S.P2); S.X2 = await mk('P2 item 2', {}, S.P2)
+    assert.equal((await call(H.intel.POST, { as: TEAM, method: 'POST', body: { note: 'INTERNAL-SENTINEL-TEXT' } })).status, 201)
+  })
+
+  await step('RELEASE SWITCH: with AGENT_ACCESS_ENABLED unset, an agent gets nothing from any agent route (and health says so)', async () => {
+    const saved = process.env.AGENT_ACCESS_ENABLED; delete process.env.AGENT_ACCESS_ENABLED
+    try {
+      for (const h of [H.agentMe.GET, H.agentItems.GET, H.agentIntel.GET]) { const r = await call(h, { as: AGENT_A }); assert.equal(r.status, 403); assert.match(r.json.error, /not been released/) }
+      const post = await call(H.agentIntel.POST, { as: AGENT_A, method: 'POST', body: { note: 'x' } }); assert.equal(post.status, 403)
+      const health = await call(H.health.GET, { as: MANAGER }); assert.match(health.json.optional.agent_portal, /disabled/)
+    } finally { process.env.AGENT_ACCESS_ENABLED = saved }
+    assert.equal((await call(H.agentMe.GET, { as: AGENT_A })).status, 200, 'released again')
+    assert.match((await call(H.health.GET, { as: MANAGER })).json.optional.agent_portal, /ENABLED/)
+  })
+
+  await step('B12: agent accounts — validated before any auth account exists; Team cannot create; an agent can never change role', async () => {
+    const body = { full_name: 'New Agent', email: 'new.agent@x.test', role_key: 'agent' }
+    assert.equal((await call(H.users.POST, { as: TEAM, method: 'POST', body: { ...body, agent_id: CO_A } })).status, 403)
+    assert.equal((await call(H.users.POST, { as: MANAGER, method: 'POST', body })).status, 400, 'no company')
+    assert.equal((await call(H.users.POST, { as: MANAGER, method: 'POST', body: { ...body, agent_id: NIL } })).status, 400, 'company does not exist')
+    assert.equal((await call(H.users.POST, { as: MANAGER, method: 'POST', body: { ...body, agent_id: 'nope' } })).status, 400)
+    const promote = await call(H.userById.PATCH, { as: CEO, method: 'PATCH', body: { role_key: 'ceo' }, params: { id: AGENT_A } })
+    assert.equal(promote.status, 400); assert.match(promote.json.error, /cannot change role/)
+    assert.equal((await svc.from('profiles').select('role_key').eq('id', AGENT_A).single()).data!.role_key, 'agent', 'still an agent')
+    const list = await call(H.users.GET, { as: MANAGER }); assert.ok(list.json.some((u: any) => u.id === AGENT_A && u.agent_id === CO_A))
+  })
+
+  await step('B15 SWEEP: every route in the app refuses an agent (403) and an anonymous visitor (401) — discovered automatically, so a future route cannot be forgotten', async () => {
+    const fs = await import('node:fs'); const path = await import('node:path')
+    const apiDir = path.join(process.cwd(), 'src/app/api')
+    const rels = (fs.readdirSync(apiDir, { recursive: true }) as string[]).map((f) => f.replace(/\\/g, '/')).filter((f) => f.endsWith('route.ts')).map((f) => f.replace(/\/?route\.ts$/, ''))
+    // A sweep that silently finds nothing would 'pass' while proving nothing, so insist it reached a healthy number of
+    // routes AND specific deeply-nested dynamic ones (that is where a recursive directory walk would go wrong).
+    assert.ok(rels.length >= 75, `only ${rels.length} routes were discovered — the sweep is not covering the app`)
+    for (const must of ['health', 'finance/export', 'users/[id]/reset-password', 'contracts/[id]/files/[fileId]', 'agent/items/[id]', 'agent-access/intel/[id]/review', 'proposals/[id]/lines/[lineId]/margin'])
+      assert.ok(rels.includes(must), `the sweep did not discover ${must}`)
+    const watched = ['audit_events', 'vendors', 'intel_notes', 'price_records', 'shareable_grants', 'profiles', 'proposals', 'items', 'invoices', 'payments', 'contracts', 'files', 'agent_activity']
+    const before = Object.fromEntries(await Promise.all(watched.map(async (t) => [t, await count(t)])))
+    const dummy = new Proxy({}, { get: () => NIL }) as Record<string, string>
+    const agentOk = (rel: string) => rel.startsWith('agent/') || rel === 'account/change-password' || rel === 'health'
+    const offenders: string[] = []; let calls = 0
+    for (const rel of rels) {
+      const mod = await load(rel)
+      for (const m of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+        if (typeof mod[m] !== 'function') continue
+        calls++
+        const opts = (as?: string) => ({ as, method: m, params: dummy, ...(m === 'GET' || m === 'DELETE' ? {} : { body: {} }) })
+        const asAgent = await call(mod[m], opts(AGENT_A)); if (!agentOk(rel) && asAgent.status !== 403) offenders.push(`AGENT  ${m} /${rel} -> ${asAgent.status}`)
+        const anon = await call(mod[m], opts(undefined)); if (rel !== 'health' && anon.status !== 401) offenders.push(`ANON   ${m} /${rel} -> ${anon.status}`)
+        if (rel.startsWith('agent/')) for (const u of [TEAM, MANAGER, CEO]) { const r = await call(mod[m], opts(u)); if (r.status !== 403) offenders.push(`STAFF  ${m} /${rel} as ${u.slice(0, 2)} -> ${r.status} (agent routes are for agents only)`) }
+      }
+    }
+    assert.deepEqual(offenders, [], `swept ${calls} handlers across ${rels.length} routes:\n${offenders.join('\n')}`)
+    const after = Object.fromEntries(await Promise.all(watched.map(async (t) => [t, await count(t)])))
+    // The sweep also CALLS the legitimate agent routes as an agent, and two of those are views (the inventory list and the
+    // intel list), which are logged by design. So the log grows by exactly 2 — and NOTHING else may change.
+    const changed = Object.fromEntries(watched.filter((t) => after[t] !== before[t]).map((t) => [t, after[t] - before[t]]))
+    assert.deepEqual(changed, { agent_activity: 2 }, `tables changed by the sweep: ${JSON.stringify(changed)}`)
+    console.log(`        (swept ${calls} handlers across ${rels.length} routes, as an agent and as nobody)`)
+    const pw = await call(H.changePw2.POST, { as: AGENT_A, method: 'POST', body: { new_password: 'short' } })
+    assert.equal(pw.status, 400, 'an agent CAN reach change-password (and is stopped by validation, not by the gate)')
+  })
+
+  await step('B13: grants — Team refused everywhere; Manager shares items; duplicates and bad input handled; one item per title/price', async () => {
+    assert.equal((await call(H.grants.POST, { as: TEAM, method: 'POST', body: { agent_id: CO_A, item_ids: [S.G1] } })).status, 403)
+    assert.equal((await call(H.grants.GET, { as: TEAM, query: `?agent_id=${CO_A}` })).status, 403)
+    assert.equal((await call(H.activity.GET, { as: TEAM })).status, 403)
+    assert.equal((await call(H.agentsList.GET, { as: TEAM })).status, 403)
+    assert.equal((await call(H.grants.POST, { as: MANAGER, method: 'POST', body: { agent_id: CO_A } })).status, 400, 'no items')
+    assert.equal((await call(H.grants.POST, { as: MANAGER, method: 'POST', body: { agent_id: NIL, item_ids: [S.G1] } })).status, 400)
+    assert.equal((await call(H.grants.POST, { as: MANAGER, method: 'POST', body: { agent_id: CO_A, item_ids: [NIL] } })).status, 400, 'item does not exist')
+    assert.equal((await call(H.grants.POST, { as: MANAGER, method: 'POST', body: { agent_id: CO_A, item_ids: [S.G1, S.G2], display_title: 'X' } })).status, 400, 'a title is per-item')
+    assert.equal((await call(H.grants.POST, { as: MANAGER, method: 'POST', body: { agent_id: CO_A, item_ids: [S.G1], indicative_price: -5 } })).status, 400)
+    assert.equal(await count('shareable_grants'), 0, 'every refused request created nothing')
+
+    const g1 = await call(H.grants.POST, { as: MANAGER, method: 'POST', body: { agent_id: CO_A, item_ids: [S.G1], display_title: 'Premium LED package', indicative_price: 15000 } })
+    assert.equal(g1.status, 201, JSON.stringify(g1.json)); assert.equal(g1.json.created, 1)
+    const again = await call(H.grants.POST, { as: MANAGER, method: 'POST', body: { agent_id: CO_A, item_ids: [S.G1] } }); assert.equal(again.json.created, 0); assert.equal(again.json.already_shared, 1)
+    const forB = await call(H.grants.POST, { as: MANAGER, method: 'POST', body: { agent_id: CO_B, item_ids: [S.G2], property_id: S.P2 } })
+    assert.equal(forB.json.created, 3, 'G2 + both items of property two (a property expands to its CURRENT items)')
+    const list = await call(H.agentsList.GET, { as: MANAGER }); const a = list.json.agents.find((x: any) => x.id === CO_A)
+    assert.equal(a.active_grants, 1); assert.deepEqual(a.users.map((u: any) => u.id), [AGENT_A]); assert.equal(list.json.portal_enabled, true)
+    const gl = await call(H.grants.GET, { as: MANAGER, query: `?agent_id=${CO_A}` }); S.grantA = gl.json[0].id; assert.equal(gl.json.length, 1)
+    const gb = await call(H.grants.GET, { as: MANAGER, query: `?agent_id=${CO_B}` }); S.grantB = gb.json.find((g: any) => g.items.name === 'Agent item two').id
+  })
+
+  await step('B14: what an agent sees — exactly the allow-listed keys, white-label title, the typed price, and not one planted secret', async () => {
+    const list = await call(H.agentItems.GET, agentCreds(AGENT_A)); assert.equal(list.status, 200, JSON.stringify(list.json))
+    assert.equal(list.json.length, 1, 'only the one item shared with Agent Co A')
+    const v = list.json[0]
+    assert.deepEqual(Object.keys(v).sort(), ITEM_KEYS); assert.equal(v.id, S.grantA); assert.notEqual(v.id, S.G1, 'the id is the grant id, never the internal item id')
+    assert.equal(v.title, 'Premium LED package'); assert.deepEqual(v.indicative_price, { amount: 15000, currency: 'USD' }); assert.equal(v.availability, 'Available')
+    assert.deepEqual(v.details, { asset_type: 'led_perimeter', quantity: 3 }, 'vendor_name, management_contact and cost were in the attributes and are NOT shown')
+    const detail = await call(H.agentItem.GET, { as: AGENT_A, params: { id: S.grantA } }); assert.equal(detail.status, 200); assert.deepEqual(detail.json, v)
+    const me = await call(H.agentMe.GET, agentCreds(AGENT_A)); assert.deepEqual(me.json, { name: 'agent user A', company: 'Agent Co A' })
+    for (const [name, payload] of [['list', list.json], ['detail', detail.json], ['me', me.json]] as const) assert.deepEqual(leaks(payload), [], `${name} leaked`)
+  })
+
+  await step('B14: availability is collapsed — "proposed", "sold" and "on hold" are indistinguishable (they would reveal other parties\' deals)', async () => {
+    for (const st of ['proposed', 'sold', 'on_hold', 'expired']) {
+      await svc.from('items').update({ availability: st }).eq('id', S.G1)
+      const v = (await call(H.agentItems.GET, agentCreds(AGENT_A))).json[0]
+      assert.equal(v.availability, 'Not currently available', st); assert.ok(!JSON.stringify(v).includes(st.replace('_', ' ')) && !JSON.stringify(v).includes(st))
+    }
+    await svc.from('items').update({ availability: 'available' }).eq('id', S.G1)
+    assert.equal((await call(H.agentItems.GET, agentCreds(AGENT_A))).json[0].availability, 'Available')
+  })
+
+  await step('B15 cross-agent probing: another agent\'s grant, a made-up id and a malformed id are INDISTINGUISHABLE 404s', async () => {
+    const probe = async (as: string, id: string) => { const r = await call(H.agentItem.GET, { as, params: { id } }); return { status: r.status, body: JSON.stringify(r.json) } }
+    const other = await probe(AGENT_A, S.grantB), made = await probe(AGENT_A, NIL), bad = await probe(AGENT_A, 'not-a-uuid'), inj = await probe(AGENT_A, "x' or '1'='1")
+    assert.equal(other.status, 404); assert.deepEqual(other, made, 'B\'s real grant looks exactly like one that does not exist'); assert.equal(bad.status, 404); assert.equal(inj.status, 404)
+    assert.equal((await probe(AGENT_B, S.grantA)).status, 404, 'and the other way round')
+    const b = await call(H.agentItems.GET, agentCreds(AGENT_B)); assert.equal(b.json.length, 3); assert.ok(!JSON.stringify(b.json).includes('Premium LED package'), 'B never sees A\'s item')
+    assert.ok(!JSON.stringify(b.json).includes('Agent Co A'))
+  })
+
+  await step('revocation is immediate and permanent: the next request is a 404; re-sharing makes a NEW grant, the old id stays dead', async () => {
+    const r = await call(H.grantById.DELETE, { as: MANAGER, method: 'DELETE', params: { id: S.grantA } }); assert.equal(r.status, 200)
+    assert.equal((await call(H.agentItem.GET, { as: AGENT_A, params: { id: S.grantA } })).status, 404)
+    assert.equal((await call(H.agentItems.GET, agentCreds(AGENT_A))).json.length, 0)
+    assert.equal((await call(H.grantById.DELETE, { as: MANAGER, method: 'DELETE', params: { id: S.grantA } })).status, 400, 'already revoked')
+    assert.equal((await call(H.grantById.PATCH, { as: MANAGER, method: 'PATCH', body: { display_title: 'x' }, params: { id: S.grantA } })).status, 400, 'a revoked grant cannot be edited')
+    assert.equal((await call(H.grantById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.grantA } })).status, 403)
+    assert.equal((await call(H.grants.POST, { as: MANAGER, method: 'POST', body: { agent_id: CO_A, item_ids: [S.G1], display_title: 'Premium LED package', indicative_price: 15000 } })).json.created, 1)
+    const fresh = (await call(H.agentItems.GET, agentCreds(AGENT_A))).json[0]; assert.notEqual(fresh.id, S.grantA); assert.equal((await call(H.agentItem.GET, { as: AGENT_A, params: { id: S.grantA } })).status, 404)
+    S.grantA = fresh.id
+    const edit = await call(H.grantById.PATCH, { as: MANAGER, method: 'PATCH', body: { display_title: '  Renamed  ', indicative_price: null }, params: { id: S.grantA } }); assert.equal(edit.status, 200, JSON.stringify(edit.json))
+    const v = (await call(H.agentItems.GET, agentCreds(AGENT_A))).json[0]; assert.equal(v.title, 'Renamed'); assert.equal(v.indicative_price, null, 'price cleared')
+  })
+
+  await step('B17: every view is logged (append-only); staff can read the log; Team cannot; and logging FAILS CLOSED', async () => {
+    const act = await call(H.activity.GET, { as: MANAGER, query: `?agent_id=${CO_A}` }); assert.equal(act.status, 200, JSON.stringify(act.json))
+    const actions = act.json.map((a: any) => a.action)
+    assert.ok(actions.includes('view_inventory') && actions.includes('view_item'), actions.join())
+    assert.ok(act.json.every((a: any) => a.agents.name === 'Agent Co A'), 'filtered to that agent only'); assert.ok(act.json.some((a: any) => a.profiles?.full_name === 'agent user A'))
+    assert.ok(act.json.find((a: any) => a.action === 'view_item').items.name === 'Agent item one')
+    const before = await count('agent_activity', { agent_id: CO_A }); await call(H.agentItems.GET, agentCreds(AGENT_A)); assert.equal(await count('agent_activity', { agent_id: CO_A }), before + 1, 'one view = one row')
+    await call(H.agentItem.GET, { as: AGENT_A, params: { id: S.grantB } }); assert.equal(await count('agent_activity', { agent_id: CO_A }), before + 1, 'a refused probe is not logged as a view of anything')
+    const upd = await svc.from('agent_activity').update({ action: 'view_item' }).eq('agent_id', CO_A); assert.ok(upd.error, 'even the service layer cannot alter the log')
+    const del = await svc.from('agent_activity').delete().eq('agent_id', CO_A); assert.ok(del.error, 'or delete from it')
+    const { logAgentActivity } = await import('../../src/lib/agentAccess')
+    const orgId = (await svc.from('profiles').select('org_id').eq('id', AGENT_A).single()).data!.org_id
+    await assert.rejects(() => logAgentActivity({ profile: { org_id: orgId, id: AGENT_A }, agentId: NIL, agentName: 'x' } as never, 'view_inventory'), (e: any) => e.status === 500 && /not shown/.test(e.message), 'if the log write fails the view is refused, not shown unlogged')
+  })
+
+  await step('a DISABLED account is refused immediately — agent or staff — even though its session token would still be valid', async () => {
+    for (const [u, h] of [[AGENT_A, H.agentItems.GET], [TEAM, H.notifications.GET]] as const) {
+      await svc.from('profiles').update({ disabled: true }).eq('id', u)
+      try { const r = await call(h, { as: u }); assert.equal(r.status, 403); assert.match(r.json.error, /disabled/) }
+      finally { await svc.from('profiles').update({ disabled: false }).eq('id', u) }
+      assert.equal((await call(h, { as: u })).status, 200, 're-enabled')
+    }
+  })
+
+  await step('B16: agent intel lands UNRATED and PENDING; a claimed price creates NO price record; bad input and flooding are refused', async () => {
+    const n = await call(H.agentIntel.POST, { as: AGENT_A, method: 'POST', body: { note: 'Vendor rate is rising', grant_id: S.grantA, price: 12000, currency: 'usd' } })
+    assert.equal(n.status, 201, JSON.stringify(n.json)); assert.deepEqual(Object.keys(n.json).sort(), INTEL_KEYS); assert.equal(n.json.status, 'Submitted'); assert.deepEqual(n.json.claimed_price, { amount: 12000, currency: 'USD' })
+    S.noteA = n.json.id
+    const row = (await svc.from('intel_notes').select('reliability, review_status, source, submitted_by_agent_id, linked_type, linked_id').eq('id', S.noteA).single()).data!
+    assert.deepEqual(row, { reliability: null, review_status: 'pending', source: 'agent', submitted_by_agent_id: CO_A, linked_type: 'item', linked_id: S.G1 })
+    assert.equal(await count('price_records', { item_id: S.G1, type: 'market_intel' }), 0, 'an unreviewed agent price must not become a market-intel price (it feeds the warnings)')
+
+    for (const body of [{ note: '   ' }, { note: 'x'.repeat(2001) }, { note: 'n', price: 5 }, { note: 'n', grant_id: S.grantB }, { note: 'n', grant_id: 'bad' }, { note: 'n', grant_id: S.grantA, price: -1 }, { note: 'n', grant_id: S.grantA, price: 5, currency: 'DOLLARS' }, { note: 'n', grant_id: S.grantA, price: 'abc' }])
+      assert.equal((await call(H.agentIntel.POST, { as: AGENT_A, method: 'POST', body })).status, 400, JSON.stringify(body).slice(0, 60))
+
+    const flood = Array.from({ length: 48 }, (_, i) => ({ org_id: orgOf(), note: `flood ${i}`, source: 'agent', submitted_by_agent_id: CO_A, review_status: 'pending', reliability: null }))
+    await svc.from('intel_notes').insert(flood)
+    assert.equal((await call(H.agentIntel.POST, { as: AGENT_A, method: 'POST', body: { note: 'the 50th' } })).status, 201, '49 existing + this one = 50, allowed')
+    const over = await call(H.agentIntel.POST, { as: AGENT_A, method: 'POST', body: { note: 'the 51st' } }); assert.equal(over.status, 429); assert.match(over.json.error, /50 notes waiting/)
+    await svc.from('intel_notes').delete().eq('submitted_by_agent_id', CO_A).like('note', 'flood %'); await svc.from('intel_notes').delete().eq('submitted_by_agent_id', CO_A).eq('note', 'the 50th')
+    function orgOf() { return S.orgId }
+  })
+
+  await step('B16 isolation: an agent sees only their own company\'s notes — never another agent\'s, never internal intel', async () => {
+    const b = await call(H.agentIntel.POST, { as: AGENT_B, method: 'POST', body: { note: 'AGENT-B-NOTE-TEXT' } }); assert.equal(b.status, 201); S.noteB = b.json.id
+    const a = await call(H.agentIntel.GET, agentCreds(AGENT_A)); assert.equal(a.status, 200)
+    assert.deepEqual(a.json.map((x: any) => x.id), [S.noteA]); assert.ok(a.json.every((x: any) => Object.keys(x).sort().join() === INTEL_KEYS.join()))
+    assert.deepEqual(leaks(a.json), [], 'A sees neither B\'s note nor the internal note')
+    const bl = await call(H.agentIntel.GET, agentCreds(AGENT_B)); assert.deepEqual(bl.json.map((x: any) => x.id), [S.noteB]); assert.ok(!JSON.stringify(bl.json).includes('Vendor rate is rising'))
+  })
+
+  await step('B16 review: Team refused; Manager accepts (rating required, price recorded once) or declines; a note is reviewed exactly once; the agent never sees the rating', async () => {
+    assert.equal((await call(H.intelQueue.GET, { as: TEAM })).status, 403)
+    assert.equal((await call(H.intelReview.POST, { as: TEAM, method: 'POST', body: { decision: 'accept', reliability: 'likely' }, params: { id: S.noteA } })).status, 403)
+    const q = await call(H.intelQueue.GET, { as: MANAGER }); assert.equal(q.status, 200, JSON.stringify(q.json))
+    const names = q.json.map((n: any) => `${n.agents.name}:${n.note}`); assert.ok(names.includes('Agent Co A:Vendor rate is rising') && names.includes('Agent Co B:AGENT-B-NOTE-TEXT'), names.join('|'))
+    assert.ok(!q.json.some((n: any) => n.note === 'INTERNAL-SENTINEL-TEXT'), 'internal notes are not in the agent review queue')
+    assert.equal(q.json.find((n: any) => n.id === S.noteA).item_name, 'Agent item one')
+
+    assert.equal((await call(H.intelReview.POST, { as: MANAGER, method: 'POST', body: { decision: 'accept' }, params: { id: S.noteA } })).status, 400, 'accepting needs a rating')
+    assert.equal((await call(H.intelReview.POST, { as: MANAGER, method: 'POST', body: { decision: 'accept', reliability: 'great' }, params: { id: S.noteA } })).status, 400)
+    const internalNote = (await svc.from('intel_notes').select('id').eq('note', 'INTERNAL-SENTINEL-TEXT').single()).data!.id
+    assert.equal((await call(H.intelReview.POST, { as: MANAGER, method: 'POST', body: { decision: 'accept', reliability: 'likely' }, params: { id: internalNote } })).status, 409, 'not an agent note')
+
+    const ok = await call(H.intelReview.POST, { as: MANAGER, method: 'POST', body: { decision: 'accept', reliability: 'likely' }, params: { id: S.noteA } })
+    assert.equal(ok.status, 200, JSON.stringify(ok.json)); assert.equal(ok.json.price_recorded, true)
+    const pr = await svc.from('price_records').select('amount, currency, source, type').eq('item_id', S.G1).eq('type', 'market_intel'); assert.equal(pr.data!.length, 1)
+    assert.deepEqual(pr.data![0], { amount: 12000, currency: 'USD', source: `agent intel:${S.noteA}`, type: 'market_intel' })
+    assert.equal((await call(H.intelReview.POST, { as: MANAGER, method: 'POST', body: { decision: 'reject' }, params: { id: S.noteA } })).status, 409, 'reviewed exactly once')
+    assert.equal(await count('price_records', { item_id: S.G1, type: 'market_intel' }), 1, 'no duplicate price')
+
+    const rej = await call(H.intelReview.POST, { as: MANAGER, method: 'POST', body: { decision: 'reject' }, params: { id: S.noteB } }); assert.equal(rej.status, 200); assert.equal(rej.json.price_recorded, false)
+    const a = (await call(H.agentIntel.GET, agentCreds(AGENT_A))).json.find((x: any) => x.id === S.noteA); assert.equal(a.status, 'Reviewed')
+    assert.ok(!JSON.stringify(a).includes('likely'), 'the agent is not shown the reliability rating'); assert.equal((await call(H.agentIntel.GET, agentCreds(AGENT_B))).json[0].status, 'Declined')
+    assert.equal((await call(H.intelQueue.GET, { as: MANAGER, query: '?status=nonsense' })).status, 400)
+  })
+
+  // ---------------- B3: contract files, against an in-memory Drive ----------------
+  const { driveImpl } = await import('../../src/lib/googleDrive')
+  const realDrive = { ...driveImpl }
+  const fake = { files: new Map<string, Buffer>(), names: [] as string[], fail: false, n: 0, delay: 0 }
+  const useFakeDrive = () => {
+    driveImpl.createRecordFolder = (async ({ entityType, folderName }: { entityType: string; folderName: string }) => ({ folderId: `folder:${entityType}:${folderName}`, folderUrl: null })) as typeof driveImpl.createRecordFolder
+    driveImpl.uploadFileToFolder = (async ({ name, content }: { name: string; content: Buffer }) => { if (fake.delay) await new Promise((r) => setTimeout(r, fake.delay)); if (fake.fail) throw new Error('drive is down'); const id = `file:${++fake.n}`; fake.files.set(id, content); fake.names.push(name); return { fileId: id, webViewLink: null } }) as typeof driveImpl.uploadFileToFolder
+    driveImpl.downloadFile = (async (id: string) => { const b = fake.files.get(id); if (!b) throw new Error('not found'); return b }) as typeof driveImpl.downloadFile
+  }
+  const restoreDrive = () => Object.assign(driveImpl, realDrive)
+  const PDF = (tag: string) => Buffer.from('%PDF-1.7\n' + tag.repeat(60))
+  const form = (buf: Buffer, name: string, fields: Record<string, string> = {}) => { const f = new FormData(); f.append('file', new File([new Uint8Array(buf)], name, { type: 'application/pdf' })); for (const [k, v] of Object.entries(fields)) f.append(k, v); return f }
+  const up = (as: string, f: FormData) => call(H.files.POST, { as, method: 'POST', form: f, params: { id: S.contractId } })
+
+  await step('B3: contract files are contract.manage-only — Team is refused to list, upload and download', async () => {
+    assert.equal((await call(H.files.GET, { as: TEAM, params: { id: S.contractId } })).status, 403)
+    assert.equal((await up(TEAM, form(PDF('a'), 'x.pdf'))).status, 403)
+    assert.equal((await call(H.fileById.GET, { as: TEAM, params: { id: S.contractId, fileId: NIL } })).status, 403)
+    assert.equal((await call(H.files.GET, { as: MANAGER, params: { id: NIL } })).status, 404)
+  })
+  await step('B3: versions — v1, an identical re-upload is a no-op, a changed file is v2 (v1 no longer current), separate titles are separate chains', async () => {
+    useFakeDrive()
+    try {
+      const v1 = await up(MANAGER, form(PDF('one'), 'Signed contract.pdf', { note: 'First signed copy' })); assert.equal(v1.status, 201, JSON.stringify(v1.json)); assert.equal(v1.json.version, 1)
+      const dup = await up(MANAGER, form(PDF('one'), 'renamed copy.pdf')); assert.equal(dup.status, 200); assert.equal(dup.json.duplicate, true); assert.equal(await count('files', { linked_id: S.contractId, kind: 'contract_file' }), 1, 'identical bytes did not create a version')
+      const v2 = await up(MANAGER, form(PDF('two'), 'Signed contract.pdf')); assert.equal(v2.status, 201); assert.equal(v2.json.version, 2)
+      const amend = await up(MANAGER, form(PDF('amend'), 'Amendment 1.pdf', { title: 'Amendment' })); assert.equal(amend.json.version, 1, 'a different document title starts its own chain')
+      const list = await call(H.files.GET, { as: MANAGER, params: { id: S.contractId } }); assert.equal(list.status, 200, JSON.stringify(list.json))
+      const byKey = Object.fromEntries(list.json.map((f: any) => [`${f.doc_title}@${f.version}`, f]))
+      assert.equal(byKey['Contract@1'].is_current, false); assert.equal(byKey['Contract@2'].is_current, true); assert.equal(byKey['Amendment@1'].is_current, true)
+      assert.equal(byKey['Contract@1'].version_note, 'First signed copy'); assert.equal(byKey['Contract@1'].uploaded_by, 'manager user'); assert.equal(byKey['Contract@2'].size_bytes, PDF('two').length)
+      assert.deepEqual(fake.names.slice(0, 3), ['Contract v1 - Signed_contract.pdf', 'Contract v2 - Signed_contract.pdf', 'Amendment v1 - Amendment_1.pdf'])
+      S.fileV1 = byKey['Contract@1'].id; S.fileV2 = byKey['Contract@2'].id
+    } finally { restoreDrive() }
+  })
+  await step('B3: upload checks look at the BYTES — a renamed program, a wrong type, an empty file and an oversize file are all refused and store nothing', async () => {
+    useFakeDrive()
+    try {
+      const rows = await count('files', { linked_id: S.contractId, kind: 'contract_file' }); const uploadsBefore = fake.names.length
+      const exe = Buffer.concat([Buffer.from('MZ'), Buffer.alloc(80, 7)])
+      const bad: [string, Buffer, number][] = [['invoice.pdf', exe, 400], ['run.exe', exe, 400], ['page.html', Buffer.from('<script>alert(1)</script>'), 400], ['x.pdf', Buffer.alloc(0), 400], ['big.pdf', Buffer.concat([PDF('x'), Buffer.alloc(4 * 1024 * 1024)]), 413], ['noext', PDF('n'), 400]]
+      for (const [name, buf, want] of bad) { const r = await up(MANAGER, form(buf, name)); assert.equal(r.status, want, `${name}: ${JSON.stringify(r.json)}`) }
+      const noFile = new FormData(); noFile.append('title', 'x'); assert.equal((await up(MANAGER, noFile)).status, 400)
+      assert.equal((await up(MANAGER, form(PDF('t'), 'x.pdf', { title: 'x'.repeat(81) }))).status, 400)
+      assert.equal(await count('files', { linked_id: S.contractId, kind: 'contract_file' }), rows); assert.equal(fake.names.length, uploadsBefore, 'nothing reached Drive')
+    } finally { restoreDrive() }
+  })
+  await step('B3: if Drive is down the upload is REFUSED (502) and nothing is recorded — a contract is never "saved" without the file', async () => {
+    useFakeDrive()
+    try {
+      const rows = await count('files', { linked_id: S.contractId, kind: 'contract_file' }); fake.fail = true
+      const r = await up(MANAGER, form(PDF('while down'), 'x.pdf')); assert.equal(r.status, 502, JSON.stringify(r.json)); assert.match(r.json.error, /NOT saved/)
+      assert.equal(await count('files', { linked_id: S.contractId, kind: 'contract_file' }), rows, 'no row for a file that was never stored')
+      assert.ok(await count('audit_events', { action: 'contract_file_upload_failed' }) >= 1, 'and the failure is on the record')
+      fake.fail = false; const ok = await up(MANAGER, form(PDF('while down'), 'x.pdf')); assert.equal(ok.status, 201, 'works again once Drive is back'); assert.equal(ok.json.version, 3)
+    } finally { restoreDrive() }
+  })
+  await step('B3: download returns the exact bytes as an attachment; roll back with make_current; exactly one current version at all times', async () => {
+    useFakeDrive()
+    try {
+      const d = await call(H.fileById.GET, { as: MANAGER, params: { id: S.contractId, fileId: S.fileV1 } }); assert.equal(d.status, 200)
+      assert.ok(Buffer.from(await d.res.arrayBuffer()).equals(PDF('one')), 'byte-for-byte')
+      assert.match(d.res.headers.get('content-disposition') ?? '', /^attachment; filename="Contract-v1\.pdf"$/); assert.equal(d.res.headers.get('x-content-type-options'), 'nosniff'); assert.match(d.res.headers.get('cache-control') ?? '', /no-store/)
+      assert.equal((await call(H.fileById.GET, { as: MANAGER, params: { id: S.contractId, fileId: NIL } })).status, 404)
+      assert.equal((await call(H.fileById.GET, { as: MANAGER, params: { id: S.contractId, fileId: 'bad' } })).status, 404)
+      const otherContract = (await svc.from('contracts').select('id').neq('id', S.contractId).limit(1).single()).data!.id
+      assert.equal((await call(H.fileById.GET, { as: MANAGER, params: { id: otherContract, fileId: S.fileV1 } })).status, 404, 'a file cannot be fetched through a different contract')
+
+      assert.equal((await call(H.fileById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'make_current' }, params: { id: S.contractId, fileId: S.fileV1 } })).status, 200)
+      const cur = async () => (await svc.from('files').select('version').eq('linked_id', S.contractId).eq('doc_title', 'Contract').eq('is_current', true)).data!
+      assert.deepEqual(await cur(), [{ version: 1 }], 'rolled back to v1, and only v1 is current')
+      assert.equal((await call(H.fileById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'make_current' }, params: { id: S.contractId, fileId: S.fileV1 } })).json.unchanged, true)
+      assert.equal((await call(H.fileById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'delete' }, params: { id: S.contractId, fileId: S.fileV1 } })).status, 400)
+      assert.equal((await call(H.fileById.PATCH, { as: TEAM, method: 'PATCH', body: { action: 'make_current' }, params: { id: S.contractId, fileId: S.fileV1 } })).status, 403)
+      await call(H.fileById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'make_current' }, params: { id: S.contractId, fileId: S.fileV2 } }); assert.deepEqual(await cur(), [{ version: 2 }])
+      assert.ok(await count('audit_events', { action: 'contract_file_downloaded' }) >= 1)
+    } finally { restoreDrive() }
+  })
+  await step('B3: two uploads at the SAME instant both succeed with distinct version numbers and exactly one current (the race the unique indexes guard)', async () => {
+    useFakeDrive(); fake.delay = 40
+    try {
+      const [a, b] = await Promise.all([up(MANAGER, form(PDF('race-a'), 'a.pdf', { title: 'Race' })), up(MANAGER, form(PDF('race-b'), 'b.pdf', { title: 'Race' }))])
+      assert.equal(a.status, 201, JSON.stringify(a.json)); assert.equal(b.status, 201, JSON.stringify(b.json))
+      assert.deepEqual([a.json.version, b.json.version].sort(), [1, 2], 'no duplicated version number')
+      const rows = (await svc.from('files').select('version, is_current').eq('linked_id', S.contractId).eq('doc_title', 'Race')).data!
+      assert.equal(rows.length, 2); assert.equal(rows.filter((r: any) => r.is_current).length, 1, 'exactly one current'); assert.equal(rows.find((r: any) => r.is_current)!.version, 2, 'and it is the newest')
+    } finally { fake.delay = 0; restoreDrive() }
   })
   await step('/api/health reports every migration present and no critical env missing', async () => {
     const r = await call(H.health.GET, { as: MANAGER }); assert.equal(r.status, 200, JSON.stringify(r.json))

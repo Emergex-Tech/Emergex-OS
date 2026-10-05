@@ -3,9 +3,10 @@ import { requireProfile, ApiError } from '@/lib/auth'
 import { requirePermission, writeAudit } from '@/lib/serviceLayer'
 import { supabaseService } from '@/lib/supabaseServer'
 import { generateTempPassword } from '@/lib/passwords'
+import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
-const VALID_ROLES = ['team', 'manager', 'ceo']
+const VALID_ROLES = ['team', 'manager', 'ceo', 'agent']
 
 /** Every account in this org — Management/CEO's user list. Team gets 403, checked server-side, not just hidden in the UI. */
 export async function GET() {
@@ -15,7 +16,7 @@ export async function GET() {
     const svc = supabaseService()
     const { data, error } = await svc
       .from('profiles')
-      .select('id, full_name, email, role_key, disabled, created_at')
+      .select('id, full_name, email, role_key, disabled, created_at, agent_id')
       .eq('org_id', profile.org_id)
       .order('created_at', { ascending: true })
     if (error) throw new ApiError(400, error.message)
@@ -45,6 +46,12 @@ export async function POST(req: NextRequest) {
     if (!VALID_ROLES.includes(role)) throw new ApiError(400, `role_key must be one of ${VALID_ROLES.join(', ')}`)
 
     const svc = supabaseService()
+    // An agent login belongs to an agent COMPANY. Checked BEFORE the auth account is created, so a bad id can't leave an orphan.
+    if (role === 'agent') {
+      if (!isUuid(body.agent_id)) throw new ApiError(400, 'Choose which agent company this login belongs to')
+      const { data: ag } = await svc.from('agents').select('id').eq('id', body.agent_id).eq('org_id', profile.org_id).maybeSingle()
+      if (!ag) throw new ApiError(400, 'That agent company does not exist')
+    }
     const password = typeof body.password === 'string' && body.password.length >= 8 ? body.password : generateTempPassword()
 
     const { data: created, error: authError } = await svc.auth.admin.createUser({
@@ -57,8 +64,8 @@ export async function POST(req: NextRequest) {
     }
 
     const { data: profileRow, error: profileError } = await svc.from('profiles').insert({
-      id: created.user.id, org_id: profile.org_id, full_name: fullName, email, role_key: role
-    }).select('id, full_name, email, role_key, disabled, created_at').single()
+      id: created.user.id, org_id: profile.org_id, full_name: fullName, email, role_key: role, agent_id: role === 'agent' ? body.agent_id : null
+    }).select('id, full_name, email, role_key, disabled, created_at, agent_id').single()
 
     if (profileError) {
       // The profile is what makes this a usable account in THIS org — if it fails, don't leave an orphaned auth user behind.

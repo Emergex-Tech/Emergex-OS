@@ -39,6 +39,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
       setWho({ id: data.session.user.id, email: data.session.user.email ?? '' })
 
       const { data: profile } = await supabase.from('profiles').select('role_key').eq('id', data.session.user.id).single()
+      if (profile?.role_key === 'agent') { router.replace('/agent'); return } // agents never see the staff app
       if (!profile) setNoProfile(true)
       setRole(profile?.role_key ?? null)
       setReady(true)
@@ -74,7 +75,7 @@ select '${who.id}', id, '${who.email}', '${who.email}', 'ceo' from org;`}</pre>
   const nav = [
     ...NAV,
     ...(CEO_VIEW_ROLES.includes(role ?? '') ? [{ href: '/ceo-view', label: 'CEO View' }] : []),
-    ...(MANAGEMENT_ROLES.includes(role ?? '') ? [{ href: '/users', label: 'Users' }] : [])
+    ...(MANAGEMENT_ROLES.includes(role ?? '') ? [{ href: '/finance', label: 'Finance' }, { href: '/agent-access', label: 'Agent access' }, { href: '/users', label: 'Users' }] : [])
   ]
 
   return (

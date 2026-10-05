@@ -17,6 +17,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     const svc = supabaseService()
     const { data: before } = await svc.from('profiles').select('*').eq('id', params.id).eq('org_id', profile.org_id).single()
     if (!before) throw new ApiError(404, 'User not found')
+    if (before.role_key === 'agent') throw new ApiError(400, 'An agent account cannot change role. Disable it and create a new account instead.')
     if (before.role_key === 'ceo' && body.role_key !== 'ceo' && profile.role_key !== 'ceo') {
       throw new ApiError(403, 'Only a CEO can change another CEO\'s role')
     }
