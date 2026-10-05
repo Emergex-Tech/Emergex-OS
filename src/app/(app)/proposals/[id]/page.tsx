@@ -1,5 +1,6 @@
 'use client'
 import { useEffect, useState } from 'react'
+import AddFromShortlist from '@/components/AddFromShortlist'
 import { useParams } from 'next/navigation'
 import { supabaseBrowser } from '@/lib/supabaseBrowser'
 
@@ -356,6 +357,7 @@ export default function ProposalDetail() {
         </table>
       </div>
 
+      <AddFromShortlist proposalId={params.id} onDone={load} />
       <div className="bg-panel border border-line rounded-xl p-4">
         <div className="text-xs text-muted uppercase mb-2">Add item</div>
         <div className="flex gap-2">

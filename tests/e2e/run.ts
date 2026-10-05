@@ -72,7 +72,7 @@ async function main() {
   const { supabaseService } = await import('../../src/lib/supabaseServer')
   const svc = supabaseService()
   const count = async (table: string, f: Record<string, string | null> = {}) => {
-    let q: any = svc.from(table).select('id', { count: 'exact', head: true })
+    let q: any = svc.from(table).select('*', { count: 'exact', head: true })
     for (const [k, v] of Object.entries(f)) q = v === null ? q.is(k, null) : q.eq(k, v)
     return (await q).count as number
   }
@@ -102,6 +102,9 @@ async function main() {
     agentMe: await load('agent/me'), agentItems: await load('agent/items'), agentItem: await load('agent/items/[id]'), agentIntel: await load('agent/intel'),
     agentsList: await load('agent-access/agents'), grants: await load('agent-access/grants'), grantById: await load('agent-access/grants/[id]'),
     activity: await load('agent-access/activity'), intelQueue: await load('agent-access/intel'), intelReview: await load('agent-access/intel/[id]/review'),
+    benchmarks: await load('benchmarks'), benchCurve: await load('benchmarks/curve'), itemSearch: await load('items/search'),
+    savedFilters: await load('saved-filters'), savedFilterById: await load('saved-filters/[id]'), shortlists: await load('shortlists'),
+    shortlistById: await load('shortlists/[id]'), shortlistItems: await load('shortlists/[id]/items'), shortlistItem: await load('shortlists/[id]/items/[itemId]'),
     files: await load('contracts/[id]/files'), fileById: await load('contracts/[id]/files/[fileId]'), changePw2: await load('account/change-password')
   }
 
@@ -928,6 +931,130 @@ async function main() {
       const rows = (await svc.from('files').select('version, is_current').eq('linked_id', S.contractId).eq('doc_title', 'Race')).data!
       assert.equal(rows.length, 2); assert.equal(rows.filter((r: any) => r.is_current).length, 1, 'exactly one current'); assert.equal(rows.find((r: any) => r.is_current)!.version, 2, 'and it is the newest')
     } finally { fake.delay = 0; restoreDrive() }
+  })
+  console.log('\nStage 2B — price benchmarks (B18–B20) and shortlists / saved filters (B22)')
+  const isoDay = (offset: number) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10)
+  await step('setup: an isolated market ("Benchland") with known prices — 10k/20k/30k/40k per match, plus a different unit, currency and a market-intel price', async () => {
+    const p1 = await call(H.properties.POST, { as: TEAM, method: 'POST', body: { name: 'Bench property one', category_key: 'ooh_led', market: 'Benchland', vendor_id: S.vendor, attributes: {} } }); S.BP1 = p1.json.id
+    const p2 = await call(H.properties.POST, { as: TEAM, method: 'POST', body: { name: 'Bench property two (no event date)', category_key: 'ooh_led', market: 'Benchland', vendor_id: S.vendor, attributes: {} } }); S.BP2 = p2.json.id
+    assert.equal((await svc.from('properties').update({ event_start: isoDay(100) }).eq('id', S.BP1)).error, null)
+    const mk = async (propertyId: string, name: string) => { const r = await call(H.items.POST, { as: TEAM, method: 'POST', body: { property_id: propertyId, name } }); assert.equal(r.status, 201); return r.json.id as string }
+    S.BA = await mk(S.BP1, 'Bench A'); S.BB = await mk(S.BP1, 'Bench B'); S.BC = await mk(S.BP2, 'Bench C')
+    const rec = (item: string, type: string, amount: number, ago: number, days: number | null, unit = 'per_match', currency = 'USD') => ({ org_id: S.orgId, item_id: item, type, amount, currency, unit, price_date: isoDay(-ago), days_to_event: days })
+    const ins = await svc.from('price_records').insert([
+      rec(S.BA, 'rack', 10000, 10, 90), rec(S.BA, 'quote', 20000, 20, 80), rec(S.BA, 'negotiated', 30000, 30, null), rec(S.BB, 'transacted', 40000, 5, 200),
+      rec(S.BA, 'rack', 5000, 10, 90, 'flat'), rec(S.BA, 'rack', 999, 10, 90, 'per_match', 'EUR'), rec(S.BA, 'market_intel', 99999, 10, 90),
+      rec(S.BA, 'rack', 11111, 3, -5),                                  // recorded AFTER the event started: excluded from the curve
+      rec(S.BC, 'rack', 2500, 10, null, 'per_season', 'GBP')            // property two has no event date and this has no days: unknown, never guessed
+    ])
+    assert.equal(ins.error, null, JSON.stringify(ins.error))
+    const mkBrand = async (name: string) => (await call(H.brands.POST, { as: MANAGER, method: 'POST', body: { name } })).json.id as string
+    S.tiered = await mkBrand('Bench Tiered Brand'); S.untiered = await mkBrand('Bench Untiered Brand')
+    assert.equal((await svc.from('brand_tier').upsert({ brand_id: S.tiered, org_id: S.orgId, tier: 'standard', margin_band_low: 18, margin_band_high: 24 })).error, null)
+  })
+  const BQ = '?market=benchland&category=ooh_led'
+  await step('B18: hand-computed statistics through the API; like-for-like groups; market intel kept SEPARATE; no brand = no sell range', async () => {
+    const r = await call(H.benchmarks.GET, { as: TEAM, query: `${BQ}&unit=per_match&currency=USD` }); assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.equal(r.json.groups.length, 1); const g = r.json.groups[0]
+    assert.deepEqual([g.n, g.min, g.p25, g.median, g.p75, g.max, g.confidence], [5, 10000, 11111, 20000, 30000, 40000, 'low'], 'the 11111 recorded after the event still counts as a cost price here (the CURVE, not the range, excludes it)')
+    const clean = await call(H.benchmarks.GET, { as: TEAM, query: `${BQ}&unit=per_match&currency=USD&min_days=0&max_days=999` })
+    const c = clean.json.groups[0]; assert.deepEqual([c.n, c.p25, c.median, c.p75], [4, 17500, 25000, 32500], 'min_days=0 leaves out the price recorded 5 days AFTER the event, giving the hand-computed 17,500 / 25,000 / 32,500')
+    assert.equal(g.suggested_sell, null, 'no brand supplied, so no sell range')
+    assert.deepEqual(r.json.market_intel.map((m: any) => [m.n, m.median]), [[1, 99999]], 'market intel is its own series')
+    const all = await call(H.benchmarks.GET, { as: TEAM, query: BQ }); const keys = all.json.groups.map((x: any) => `${x.unit}/${x.currency}`).sort()
+    assert.deepEqual(keys, ['flat/USD', 'per_match/EUR', 'per_match/USD', 'per_season/GBP'], 'one group per (unit, currency) — nothing averaged across them')
+    assert.equal((await call(H.benchmarks.GET, { as: TEAM, query: '?market=benchland-nowhere' })).json.groups.length, 0)
+    assert.equal((await call(H.benchmarks.GET, { as: TEAM, query: '?market=%25' })).json.groups.length, 0, 'a literal % is not a wildcard')
+  })
+  await step('B18: days-to-event (a missing value is derived from the event date), since-date, and vendor filters', async () => {
+    const d = await call(H.benchmarks.GET, { as: TEAM, query: `${BQ}&unit=per_match&currency=USD&min_days=120&max_days=999` }); const g = d.json.groups[0]
+    assert.deepEqual([g.n, g.median], [2, 35000], 'the 200-day price and the negotiated price whose 130 days were DERIVED from the event date')
+    const s = await call(H.benchmarks.GET, { as: TEAM, query: `${BQ}&unit=per_match&currency=USD&since_days=12` }); assert.deepEqual([s.json.groups[0].n, s.json.groups[0].median], [3, 11111], 'rack 10 days ago, transacted 5 days ago, and the 3-day-old one: 10,000 / 11,111 / 40,000')
+    const v = await call(H.benchmarks.GET, { as: TEAM, query: `${BQ}&vendor_id=${NIL}` }); assert.equal(v.json.groups.length, 0)
+    const vv = await call(H.benchmarks.GET, { as: TEAM, query: `${BQ}&vendor_id=${S.vendor}&unit=flat` }); assert.equal(vv.json.groups[0].n, 1)
+    const one = await call(H.benchmarks.GET, { as: TEAM, query: `${BQ}&unit=flat` }); assert.equal(one.json.groups[0].confidence, 'insufficient', 'one price is shown with its sample size, not dressed up as a range')
+  })
+  await step('B20: a suggested SELL range from the brand tier band — Manager only; refused (not silently ignored) for Team; none without a band or enough data', async () => {
+    const q = `${BQ}&unit=per_match&currency=USD&min_days=0&max_days=999&brand_id=${S.tiered}`
+    const m = await call(H.benchmarks.GET, { as: MANAGER, query: q }); assert.equal(m.status, 200, JSON.stringify(m.json))
+    assert.deepEqual(m.json.groups[0].suggested_sell, { low: 20650, mid: 30250, high: 40300 }, '17,500 +18%, 25,000 +21%, 32,500 +24%')
+    assert.deepEqual(m.json.brand, { name: 'Bench Tiered Brand', tier: 'standard', band: { low: 18, high: 24 } })
+    const t = await call(H.benchmarks.GET, { as: TEAM, query: q }); assert.equal(t.status, 403); assert.match(t.json.error, /Manager and CEO/)
+    assert.ok(!JSON.stringify(t.json).includes('suggested_sell'), 'and nothing about the tier leaks in the refusal')
+    const flat = await call(H.benchmarks.GET, { as: MANAGER, query: `${BQ}&unit=flat&brand_id=${S.tiered}` }); assert.equal(flat.json.groups[0].suggested_sell, null, 'one price: no honest range, so no sell suggestion')
+    const nb = await call(H.benchmarks.GET, { as: MANAGER, query: `${BQ}&unit=per_match&currency=USD&brand_id=${S.untiered}` }); assert.equal(nb.json.groups[0].suggested_sell, null); assert.equal(nb.json.brand.band, null); assert.match(JSON.stringify(nb.json.notes), /no tier margin band/)
+    assert.equal((await call(H.benchmarks.GET, { as: MANAGER, query: `${BQ}&brand_id=${NIL}` })).status, 404)
+  })
+  await step('B18: bad filters are refused with a clear error', async () => {
+    for (const q of ['?category=A%20B', '?currency=DOLLARS', '?vendor_id=nope', '?min_days=10&max_days=5', '?min_days=abc', '?since_days=0', '?unit=%3Cscript%3E', '?brand_id=nope', `?market=${'x'.repeat(61)}`])
+      assert.equal((await call(H.benchmarks.GET, { as: MANAGER, query: q })).status, 400, q)
+  })
+  await step('B19: price curve — medians by days-to-event; a derived day count is used; post-event and unknown-day prices are excluded and COUNTED; market intel plotted but not in the medians', async () => {
+    const r = await call(H.benchCurve.GET, { as: TEAM, query: `?property_id=${S.BP1}` }); assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.equal(r.json.property, 'Bench property one'); const s = r.json.series.find((x: any) => x.unit === 'per_match' && x.currency === 'USD')
+    assert.deepEqual(s.buckets.map((b: any) => [b.label, b.n, b.median]), [['61–90 days', 2, 15000], ['91–180 days', 1, 30000], ['181+ days', 1, 40000]], 'rack(90)+quote(80); negotiated(derived 130); transacted(200)')
+    assert.equal(s.excluded_after_event, 1); assert.ok(s.points.some((p: any) => p.type === 'market_intel' && p.amount === 99999), 'market intel is plotted…'); assert.ok(!s.buckets.some((b: any) => b.median === 99999), '…but never enters a median')
+    assert.equal(r.json.series.length, 3, 'per_match/USD, flat/USD, per_match/EUR are separate series')
+    const none = await call(H.benchCurve.GET, { as: TEAM, query: `?property_id=${S.BP2}` }); const gs = none.json.series[0]
+    assert.deepEqual([gs.buckets.length, gs.excluded_no_days, gs.points.length], [0, 1, 0], 'no event date and no recorded days: unknown, never guessed')
+    const item = await call(H.benchCurve.GET, { as: TEAM, query: `?item_id=${S.BB}` }); assert.equal(item.json.series[0].points.length, 1)
+    for (const q of ['', `?item_id=${S.BA}&property_id=${S.BP1}`, '?item_id=nope', `?property_id=${NIL}`]) assert.ok([400, 404].includes((await call(H.benchCurve.GET, { as: TEAM, query: q })).status), q)
+  })
+  await step('B22 item search: whitelisted filters, case-insensitive, wildcard-safe, and unknown filters are REFUSED', async () => {
+    const s = (q: string) => call(H.itemSearch.GET, { as: TEAM, query: q })
+    assert.deepEqual((await s('?market=BENCHLAND')).json.items.map((i: any) => i.name).sort(), ['Bench A', 'Bench B', 'Bench C'])
+    assert.deepEqual((await s('?market=benchland&q=bench%20a')).json.items.map((i: any) => i.name), ['Bench A'])
+    assert.equal((await s('?market=%25')).json.items.length, 0, 'a literal % does not match everything')
+    await svc.from('items').update({ availability: 'sold' }).eq('id', S.BB)
+    assert.deepEqual((await s('?market=benchland&availability=sold')).json.items.map((i: any) => i.name), ['Bench B'])
+    assert.equal((await s('?market=benchland&category_key=player_athlete')).json.items.length, 0)
+    const row = (await s('?market=benchland&q=bench%20c')).json.items[0]; assert.equal(row.properties.vendors.name, 'Apex Sports Media'); assert.equal(row.properties.categories.label.length > 0, true)
+    for (const q of ['?evil=1', '?availability=maybe', '?vendor_id=x', `?q=${'x'.repeat(81)}`, '?category_key=A%20B']) assert.equal((await s(q)).status, 400, q)
+  })
+  await step('B22 saved filters: private by default, shareable read-only, owner-only edits, per-person names, junk criteria refused', async () => {
+    const make = (as: string, body: unknown) => call(H.savedFilters.POST, { as, method: 'POST', body })
+    const f = await make(TEAM, { name: 'Led in Benchland', criteria: { category_key: 'ooh_led', market: 'Benchland' } }); assert.equal(f.status, 201, JSON.stringify(f.json)); S.f1 = f.json.id
+    assert.equal((await make(TEAM, { name: 'led IN benchland', criteria: {} })).status, 409, 'names are unique per person, case-insensitively')
+    assert.equal((await make(MANAGER, { name: 'Led in Benchland', criteria: {} })).status, 201, 'but another person can use the same name')
+    for (const body of [{ name: 'x', criteria: { evil: 1 } }, { name: 'x', criteria: [1, 2] }, { name: 'x', criteria: 'text' }, { name: '  ' }, { name: 'n'.repeat(81) }, { name: 'x', criteria: { availability: 'maybe' } }])
+      assert.equal((await make(TEAM, body)).status, 400, JSON.stringify(body).slice(0, 60))
+    const priv = await make(TEAM, { name: 'Private one', criteria: { market: 'UK' } }); S.f2 = priv.json.id
+
+    const mgr = await call(H.savedFilters.GET, { as: MANAGER }); assert.ok(!mgr.json.some((x: any) => x.name === 'Private one'), 'another person\'s private filter is invisible')
+    assert.equal((await call(H.savedFilterById.PATCH, { as: MANAGER, method: 'PATCH', body: { name: 'hijack' }, params: { id: S.f2 } })).status, 404, 'indistinguishable from a filter that does not exist')
+    assert.equal((await call(H.savedFilterById.PATCH, { as: TEAM, method: 'PATCH', body: { shared: true }, params: { id: S.f1 } })).status, 200)
+    const seen = (await call(H.savedFilters.GET, { as: MANAGER })).json.find((x: any) => x.id === S.f1); assert.ok(seen && seen.mine === false && seen.owner === 'team user' && seen.shared === true)
+    assert.equal((await call(H.savedFilterById.PATCH, { as: MANAGER, method: 'PATCH', body: { name: 'hijack' }, params: { id: S.f1 } })).status, 403, 'shared means readable, not editable')
+    assert.equal((await call(H.savedFilterById.DELETE, { as: MANAGER, method: 'DELETE', params: { id: S.f1 } })).status, 403)
+    assert.equal((await call(H.savedFilterById.PATCH, { as: TEAM, method: 'PATCH', body: { criteria: { market: 'UAE' } }, params: { id: S.f1 } })).status, 200)
+    assert.equal((await call(H.savedFilterById.PATCH, { as: TEAM, method: 'PATCH', body: {}, params: { id: S.f1 } })).status, 400)
+    assert.equal((await call(H.savedFilterById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.f1 } })).status, 200); assert.equal((await call(H.savedFilterById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.f1 } })).status, 404)
+    assert.equal((await call(H.savedFilterById.DELETE, { as: TEAM, method: 'DELETE', params: { id: 'nope' } })).status, 404)
+  })
+  await step('B22 shortlists: add is idempotent, privacy and read-only sharing, owner-only changes, items removed with the list', async () => {
+    const sl = await call(H.shortlists.POST, { as: TEAM, method: 'POST', body: { name: 'Bench shortlist', note: 'for the Benchland pitch' } }); assert.equal(sl.status, 201, JSON.stringify(sl.json)); S.sl = sl.json.id
+    assert.equal((await call(H.shortlists.POST, { as: TEAM, method: 'POST', body: { name: 'BENCH SHORTLIST' } })).status, 409)
+    assert.equal((await call(H.shortlists.POST, { as: TEAM, method: 'POST', body: { name: '' } })).status, 400)
+    const add = (as: string, ids: unknown) => call(H.shortlistItems.POST, { as, method: 'POST', body: { item_ids: ids }, params: { id: S.sl } })
+    const a1 = await add(TEAM, [S.BA, S.BB]); assert.equal(a1.status, 201); assert.deepEqual([a1.json.added, a1.json.already_there], [2, 0])
+    const a2 = await add(TEAM, [S.BA, S.BB, S.BC]); assert.deepEqual([a2.json.added, a2.json.already_there], [1, 2], 'adding again never duplicates')
+    assert.equal((await add(TEAM, [NIL])).status, 400, 'an item that does not exist'); assert.equal((await add(TEAM, [])).status, 400); assert.equal((await add(TEAM, ['nope'])).status, 400)
+    assert.equal(await count('shortlist_items', { shortlist_id: S.sl }), 3)
+
+    const detail = await call(H.shortlistById.GET, { as: TEAM, params: { id: S.sl } }); assert.equal(detail.json.items.length, 3); assert.ok(detail.json.items.every((i: any) => i.items.name.startsWith('Bench')))
+    assert.equal((await call(H.shortlistById.GET, { as: MANAGER, params: { id: S.sl } })).status, 404, 'private: invisible to others')
+    assert.ok(!(await call(H.shortlists.GET, { as: MANAGER })).json.some((x: any) => x.id === S.sl))
+    assert.equal((await call(H.shortlistById.PATCH, { as: TEAM, method: 'PATCH', body: { shared: true }, params: { id: S.sl } })).status, 200)
+    const shared = await call(H.shortlistById.GET, { as: MANAGER, params: { id: S.sl } }); assert.equal(shared.status, 200); assert.equal(shared.json.mine, false); assert.equal(shared.json.items.length, 3)
+    assert.equal((await call(H.shortlists.GET, { as: MANAGER })).json.find((x: any) => x.id === S.sl).item_count, 3)
+    assert.equal((await add(MANAGER, [S.BA])).status, 403, 'shared is read-only'); assert.equal((await call(H.shortlistById.DELETE, { as: MANAGER, method: 'DELETE', params: { id: S.sl } })).status, 403)
+    assert.equal((await call(H.shortlistItem.DELETE, { as: MANAGER, method: 'DELETE', params: { id: S.sl, itemId: S.BA } })).status, 403)
+
+    assert.equal((await call(H.shortlistItem.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.sl, itemId: S.BA } })).status, 200)
+    assert.equal((await call(H.shortlistItem.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.sl, itemId: S.BA } })).status, 404, 'already removed')
+    assert.equal((await call(H.shortlistById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.sl } })).status, 200)
+    assert.equal(await count('shortlist_items', { shortlist_id: S.sl }), 0, 'deleting a shortlist removes its items')
+    assert.equal((await call(H.shortlistById.GET, { as: TEAM, params: { id: S.sl } })).status, 404)
   })
   await step('/api/health reports every migration present and no critical env missing', async () => {
     const r = await call(H.health.GET, { as: MANAGER }); assert.equal(r.status, 200, JSON.stringify(r.json))
