@@ -28,7 +28,7 @@ export async function buildNotifications(orgId: string, opts: { finance: boolean
     svc.from('share_conflict_overrides').select('id', { count: 'exact', head: true }).eq('org_id', orgId).eq('status', 'pending'),
     svc.from('proposals').select('id, updated_at, brands(name)').eq('org_id', orgId).not('stage', 'in', '(Won,Lost)'),
     svc.from('contracts').select('id, renewal_date, deals(proposals(brands(name)))').eq('org_id', orgId).eq('status', 'active').lte('renewal_date', renewalSoon).gte('renewal_date', today),
-    svc.from('deliverables').select('id, description, due_date, contract_id').eq('org_id', orgId).eq('status', 'pending').lt('due_date', today).limit(20)
+    svc.from('deliverables').select('id, description, due_date, contract_id').eq('org_id', orgId).in('status', ['planned', 'partial']).lt('due_date', today).limit(20)
   ])
 
   const groups: NotificationGroup[] = []
