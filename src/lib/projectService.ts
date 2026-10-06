@@ -4,6 +4,7 @@ import { toCents } from './billing'
 import { templateForCategories, effectiveStatus, phaseProgress, gateStatus, summariseOpenRequests, ruleSatisfied, type ProjectFacts, type GateRule, type ItemStatus } from './projects'
 import { projectDelivery, deliveryPct, type DeliveryItem, type DeliveryStatus } from './delivery'
 import { writeAudit } from './serviceLayer'
+import { summariseMetrics, proofMissing, type MetricDef, type MetricEntry } from './metrics'
 
 const emptyFacts = (): ProjectFacts => ({ contractExists: false, contractFileUploaded: false, receivables: { total: 0, issued: 0, paid: 0 } })
 
@@ -43,7 +44,10 @@ export async function loadDeliverablesByDeal(orgId: string, dealIds: string[]) {
     .select('id, contract_id, description, due_date, status, planned_quantity, delivered_quantity, unit, make_good_of, invoice_adjustment, adjustment_note, owner:profiles!deliverables_owner_id_fkey(full_name)')
     .in('contract_id', Array.from(dealByContract.keys())).order('due_date', { ascending: true, nullsFirst: false })
   if (error) throw new ApiError(500, `Could not load deliverables: ${error.message}`)
-  for (const d of data ?? []) out.get(dealByContract.get(d.contract_id)!)!.push({ ...d, planned_quantity: Number(d.planned_quantity), delivered_quantity: Number(d.delivered_quantity), pct: deliveryPct(Number(d.planned_quantity), Number(d.delivered_quantity)), owner_name: (d.owner as unknown as { full_name: string } | null)?.full_name ?? null, owner: undefined })
+  const proofCount = new Map<string, number>()
+  const delIds = (data ?? []).map((d) => d.id as string)
+  if (delIds.length) { const { data: pr } = await svc.from('deliverable_proofs').select('deliverable_id').in('deliverable_id', delIds).is('archived_at', null); for (const x of pr ?? []) proofCount.set(x.deliverable_id, (proofCount.get(x.deliverable_id) ?? 0) + 1) }
+  for (const d of data ?? []) out.get(dealByContract.get(d.contract_id)!)!.push({ ...d, proof_count: proofCount.get(d.id) ?? 0, planned_quantity: Number(d.planned_quantity), delivered_quantity: Number(d.delivered_quantity), pct: deliveryPct(Number(d.planned_quantity), Number(d.delivered_quantity)), owner_name: (d.owner as unknown as { full_name: string } | null)?.full_name ?? null, owner: undefined })
   return { byDeal: out, contractByDeal }
 }
 const toDelivery = (rows: Record<string, unknown>[]): DeliveryItem[] => rows.map((r) => ({ status: r.status as DeliveryStatus, planned: Number(r.planned_quantity), delivered: Number(r.delivered_quantity) }))
@@ -138,6 +142,8 @@ export async function loadProjectDetail(orgId: string, projectId: string) {
   })
   const progress = phaseProgress(checklist.map((c) => ({ phase_no: c.phase_no, phase_name: c.phase_name, side: c.side, status: c.effective_status })))
   const own = dels.byDeal.get(p.deal_id) ?? []
+  const categories = await projectCategories(orgId, p.deal_id)
+  const metrics = await loadMetricSummary(orgId, projectId, categories)
   const allDeliverables = dealIds.flatMap((d) => dels.byDeal.get(d) ?? [])
   return {
     project: {
@@ -151,7 +157,8 @@ export async function loadProjectDetail(orgId: string, projectId: string) {
     deliverables: { items: own, summary: projectDelivery(toDelivery(own)) },
     upsells: childRows.map((c) => ({ id: c.id, name: c.name, status: c.status, delivery: projectDelivery(toDelivery(dels.byDeal.get(c.deal_id) ?? [])) })),
     combined_delivery: childRows.length ? projectDelivery(toDelivery(allDeliverables)) : null,
-    requests: summariseOpenRequests(comms.data ?? [])
+    requests: summariseOpenRequests(comms.data ?? []),
+    categories, metrics, proof_missing: own.filter((x) => proofMissing({ status: String(x.status), delivered_quantity: Number(x.delivered_quantity) }, Number(x.proof_count ?? 0))).length
   }
 }
 
@@ -170,3 +177,22 @@ export async function loadOwnProject(orgId: string, projectId: string) {
   if (!data) throw new ApiError(404, 'Project not found')
   return data
 }
+
+/** The distinct inventory categories of the lines on a project's proposal — they decide which metric sets apply. */
+export async function projectCategories(orgId: string, dealId: string): Promise<string[]> {
+  const svc = supabaseService()
+  const { data: deal } = await svc.from('deals').select('proposal_id').eq('id', dealId).eq('org_id', orgId).maybeSingle()
+  if (!deal?.proposal_id) return []
+  const { data: lines } = await svc.from('proposal_lines').select('items(properties(category_key))').eq('proposal_id', deal.proposal_id)
+  return Array.from(new Set((lines ?? []).map((l) => (l.items as unknown as { properties: { category_key: string } | null } | null)?.properties?.category_key).filter((k): k is string => !!k)))
+}
+export async function loadMetricDefs(categories: string[]): Promise<MetricDef[]> {
+  if (!categories.length) return []
+  const { data } = await supabaseService().from('metric_definitions').select('category_key, key, label, unit, aggregation, position, active').in('category_key', categories).order('category_key').order('position')
+  return (data ?? []) as MetricDef[]
+}
+export async function loadMetricSummary(orgId: string, projectId: string, categories: string[]) {
+  const [defs, entries] = await Promise.all([loadMetricDefs(categories), supabaseService().from('project_metrics').select('deliverable_id, category_key, metric_key, value, recorded_on, created_at, voided_at').eq('org_id', orgId).eq('project_id', projectId).is('voided_at', null).limit(2000)])
+  return summariseMetrics(((entries.data ?? []) as unknown as MetricEntry[]).map((e) => ({ ...e, value: Number(e.value) })), defs)
+}
+export { proofMissing }

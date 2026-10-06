@@ -1,5 +1,6 @@
 import { supabaseService } from './supabaseServer'
 import { listInvoices } from './finance'
+import { loadProjectHealth } from './projectHealth'
 
 export interface NotificationItem { label: string; detail: string; link: string; severity: 'info' | 'warn' | 'urgent' }
 export interface NotificationGroup { title: string; items: NotificationItem[] }
@@ -65,6 +66,14 @@ export async function buildNotifications(orgId: string, opts: { finance: boolean
     label: d.description, detail: `Was due ${d.due_date}`, link: '/contracts', severity: 'urgent' as const
   }))
   if (overdueItems.length) groups.push({ title: 'Overdue deliverables', items: overdueItems })
+
+  // L27: live-project alerts. Nothing financial in here, so every internal role gets them.
+  const { alerts } = await loadProjectHealth(orgId)
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
+  if (alerts.waitingOnUs.length) groups.push({ title: 'Waiting on us', items: alerts.waitingOnUs.map((w) => ({ label: w.project, detail: `${w.summary} — ${plural(w.days, 'day')}`, link: `/projects/${w.project_id}`, severity: w.days > 5 ? 'urgent' as const : 'warn' as const })) })
+  if (alerts.dueSoon.length) groups.push({ title: 'Deliverables due this week', items: alerts.dueSoon.map((d) => ({ label: d.description, detail: `${d.project} · due ${d.due_date}`, link: `/projects/${d.project_id}`, severity: 'info' as const })) })
+  if (alerts.proofMissing.length) groups.push({ title: 'Delivered without proof', items: alerts.proofMissing.map((d) => ({ label: d.description, detail: `${d.project} — attach proof`, link: `/projects/${d.project_id}`, severity: 'warn' as const })) })
+  if (alerts.overdueSteps.length) groups.push({ title: 'Overdue project steps', items: alerts.overdueSteps.map((x) => ({ label: x.title, detail: `${x.project} · was due ${x.due_date}`, link: `/projects/${x.project_id}`, severity: 'warn' as const })) })
 
   // Money notifications only for people who hold finance.manage — otherwise this feed would quietly
   // leak exactly what that permission (and the RLS on invoices) exists to keep from Team.

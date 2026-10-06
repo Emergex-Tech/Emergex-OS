@@ -28,7 +28,8 @@ const TYPE_FOLDER_NAMES: Record<string, string> = {
   agent: 'Agents',
   property: 'Properties',
   proposal: 'Proposals', // reserved, Stage 2A
-  contract: 'Contracts'  // reserved, Stage 2B
+  contract: 'Contracts', // reserved, Stage 2B
+  project: 'Projects'    // proof files for live projects (Stage 3)
 }
 
 async function findOrCreateChildFolder(drive: drive_v3.Drive, name: string, parentId: string, sharedDriveId: string): Promise<string> {

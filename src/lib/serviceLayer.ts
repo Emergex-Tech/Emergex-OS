@@ -130,7 +130,7 @@ export async function findFolderId(orgId: string, entityType: string, entityId: 
 
 /** Finds the record's folder, creating it (best effort) if missing. Null means Drive isn't usable right now. */
 export async function ensureFolderId(params: {
-  orgId: string; actorId: string; entityType: 'proposal' | 'contract'; entityId: string; folderName: string
+  orgId: string; actorId: string; entityType: 'proposal' | 'contract' | 'project'; entityId: string; folderName: string
 }): Promise<string | null> {
   const found = await findFolderId(params.orgId, params.entityType, params.entityId)
   if (found) return found
@@ -148,7 +148,7 @@ export async function ensureFolderId(params: {
 export async function tryCreateDriveFolder(params: {
   orgId: string
   actorId: string
-  entityType: 'vendor' | 'brand' | 'agent' | 'property' | 'proposal' | 'contract'
+  entityType: 'vendor' | 'brand' | 'agent' | 'property' | 'proposal' | 'contract' | 'project'
   entityId: string
   folderName: string
 }) {
