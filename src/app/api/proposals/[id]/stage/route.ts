@@ -1,3 +1,4 @@
+import { ensureProject } from '@/lib/projectService'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireProfile, ApiError } from '@/lib/auth'
 import { requirePermission, writeAudit } from '@/lib/serviceLayer'
@@ -45,9 +46,16 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     // A29: a won proposal creates the deal record — idempotent, in case of a
     // duplicate call (e.g. a double-click), not one deal per click.
     if (toStage === 'Won') {
-      const { data: existingDeal } = await svc.from('deals').select('id').eq('proposal_id', params.id).maybeSingle()
-      if (!existingDeal) {
-        await svc.from('deals').insert({ org_id: profile.org_id, proposal_id: params.id })
+      let { data: deal } = await svc.from('deals').select('id').eq('proposal_id', params.id).maybeSingle()
+      if (!deal) {
+        const ins = await svc.from('deals').insert({ org_id: profile.org_id, proposal_id: params.id }).select('id').single()
+        deal = ins.data
+      }
+      // L1: a won deal is a live project. Best-effort, like Drive filing: a failure must not undo the Won, it is
+      // written to the audit log, and the Projects page offers a one-click repair (the backfill) for any deal still without one.
+      if (deal) {
+        try { await ensureProject(profile.org_id, deal.id, profile.id) }
+        catch (e) { await writeAudit({ orgId: profile.org_id, actorId: profile.id, action: 'project_create_failed', entityType: 'deal', entityId: deal.id, after: { error: e instanceof Error ? e.message : String(e) } }) }
       }
     }
 
