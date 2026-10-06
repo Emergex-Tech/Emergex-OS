@@ -10,14 +10,16 @@ re-confirmation, route scoring, and universal versioning.
 ## What has and hasn't been verified
 
 **Verified by execution, on a real PostgreSQL 16 plus a real PostgREST server:**
-- All SQL (schema, policies, functions, migrations 002–006, category seed) runs cleanly in order.
-- **An end-to-end suite (`tests/e2e`, 27 checks)** runs the *real route handlers* → real `supabase-js` → real PostgREST → real Postgres, acting as Team, Manager and CEO. It covers record creation, the whole pricing/approval/export/version/share flow, every permission boundary (Team refused where it should be), share conflicts and overrides, CSV import, and `/api/health`. It is also what proves that every `select(... embed ...)` string the app uses resolves against the real schema.
+- All SQL (schema, policies, functions, migrations 002–007, category seed) runs cleanly in order.
+- **An end-to-end suite (`tests/e2e`, 78 checks)** runs the *real route handlers* → real `supabase-js` → real PostgREST → real Postgres, acting as Team, Manager and CEO. It covers record creation, the whole pricing/approval/export/version/share flow, every permission boundary (Team refused where it should be), share conflicts and overrides, CSV import, user-management permission gates and the role-change/CEO-protection logic, the pipeline/won-lost/CEO-view permission boundaries (including the CEO-only `ceo_view.access` check), contracts/deliverables/notifications, agent access and contract files, an all-routes access sweep, the whole finance flow (schedules, payments, overdue, chasing, payables, CSV export), and `/api/health`. It is also what proves that every `select(... embed ...)` string the app uses resolves against the real schema.
 - **17 conflict-check scenarios** (`supabase/tests/conflicts.sql`), including the cases where it must *not* fire.
 - **Row-level security tested as four different signed-in users**, plus every insert shape the code uses.
-- `tsc --noEmit` is clean, `next build` succeeds, and 13 pure-logic checks pass (`npm run test:logic`).
+- `tsc --noEmit` is clean, `next build` succeeds, and 63 pure-logic checks pass (`npm run test:logic`). The finance SQL guarantees (overpayment trigger, void guard, constraints, RLS) are 12 more checks in `supabase/tests/finance.sql`.
+- **The tests were themselves tested.** After the finance tests passed first time, I deliberately broke the code four ways — leftover cents on the wrong instalment, the overpayment trigger dropped, a permission check removed from `/finance/overdue`, and Team given finance notifications — and confirmed each break was caught by exactly the test meant to catch it (47 of 49 passed with the two permission breaks in; the other two were caught by the pure and SQL suites). A suite that passes first time proves nothing until it's shown it can fail.
 
 **Not verified — there was no environment for it. Treat these as untested until you've seen them work:**
-- **Google sign-in and the browser-to-server session cookie hand-off.** The end-to-end suite replaces only this one lookup with "the test says who's signed in"; everything after it is real. If sign-in works but the app behaves as signed-out, this is where to look (`/api/health` shows it).
+- **The browser-to-server session cookie hand-off.** The end-to-end suite replaces only the "who is signed in" lookup with a mock; everything after it is real. If sign-in works but the app behaves as signed-out, this is where to look (`/api/health` shows it).
+- **Account creation, password reset, and disable/enable — Supabase's Auth Admin API itself** (`auth.admin.createUser`, `updateUserById`, `deleteUser`). These call Supabase's Auth (GoTrue) service, which has no equivalent running in this sandbox (only PostgREST does), so only the code *around* them was tested: permission checks (which reject before ever reaching these calls) and the role-change endpoint (which doesn't call them at all). **Create your own first account and confirm you can sign in before relying on this for real users** — see the deploy guide's step 4.
 - **Vercel's runtime itself** (cold starts and function limits beyond the settings already made).
 - Google Drive against a real Shared Drive; the Anthropic call; the UI in a browser; Excel opening the export in Excel itself.
 
@@ -45,6 +47,12 @@ rules only; the specific fields per category (`property_fields`,
 `item_fields`, `price_unit_options`) are our best judgment. **Review this
 file before relying on the dynamic forms it drives** — it's the single
 biggest assumption in this build.
+
+## Sign-in: a deliberate deviation from the PRD
+
+PRD 6.1 specifies Google Workspace sign-in. This build uses **email/password accounts created by Management/CEO** instead — requested directly, not assumed. `migrations/007_admin_managed_users.sql` and the `/api/users*` routes are the whole change; nothing about the permission model needed to change, since `user.manage` already existed and was already held by Manager and CEO.
+
+What this means in practice: no self-signup, ever. An account exists only because a Manager or CEO created it from the **Users** page (name, email, role — a temporary password is generated and shown once). The user changes it themselves afterward from **Change password** in the sidebar. A CEO can only be demoted or disabled by another CEO, so a Manager can't lock out the CEO. Disabling a user bans them at the Auth level, not just in the app, which also cuts off an active session immediately.
 
 ## What's actually built
 
@@ -77,9 +85,12 @@ biggest assumption in this build.
 
 ## What's still missing
 
-- Nothing has been run against real Google, Anthropic, or a browser yet (see "Not verified" above) — the first deploy is where those get proven.
-- **Stage 2A blocks 5 and 6** (pipeline view, transacted-price write-back on Won, lost-proposal handling, won/lost analysis, the CEO view, PowerPoint export, notifications) are not built.
+- Nothing has been run against real Supabase Auth, Google Drive, Anthropic, or a browser yet (see "Not verified" above) — the first deploy is where those get proven. Creating your own first account is the specific first thing to confirm.
+- **PowerPoint export (A17) is not built, on purpose.** The PRD's own "what to cut if time is short" table says to cut it to Excel-only, which already exists — so this isn't a gap, it's the PRD's own sanctioned scope reduction.
+- **Stage 2B is complete except B21** (matching suggestions from a brief — cut on purpose, see the benchmarks section). **Stage 3 (live projects, deliverables tracking, reporting) and Stage 4 are not started.** The PRD's own rule is that each stage should be in daily use before the next begins; that's worth following, because real use will show what Stage 3 should actually contain. Not modelled in finance: tax/VAT, credit notes, refunds or payment reversals, editing an invoice after it's created, and multi-currency.
 - No UI yet for setting a route-level agent-cut override (the API exists).
+- No self-service "forgot password" — a locked-out user needs a Manager/CEO to reset it from the Users page, not an email link. Simple to add later (Supabase supports it) but wasn't asked for.
+- No audit-log UI — every admin action (user created, role changed, disabled) is written to `audit_events`, but there's no page to browse it yet, only direct SQL.
 - Test coverage is backend-focused: there are no automated browser/UI tests.
 
 ## Deploying (GitHub + Supabase + Vercel — no local machine needed)
@@ -91,7 +102,7 @@ Upload the **contents** of this folder so that `package.json` sits at the top le
 > GitHub's browser uploader accepts about 100 files per drop, and this project has more than that, so upload in two or three batches (or use GitHub Desktop, which has no limit).
 
 ### 2. Set up Supabase (free tier is fine)
-1. Create a project. In the **SQL editor**, paste and run each file **in this order**, one at a time, waiting for "Success" each time:
+1. Create a project. In the **SQL editor**, run each of these one at a time, in a fresh tab, waiting for "Success" each time:
    1. `supabase/schema.sql`
    2. `supabase/policies.sql`
    3. `supabase/functions.sql`
@@ -100,10 +111,19 @@ Upload the **contents** of this folder so that `package.json` sits at the top le
    6. `supabase/migrations/004_stage2a_block2.sql`
    7. `supabase/migrations/005_stage2a_block3.sql`
    8. `supabase/migrations/006_stage2a_block4_conflicts.sql`
-   9. `supabase/seed_categories.sql` — loads the 12 inventory categories (this replaces the old `npm run load-categories` step)
-2. **Authentication → Providers → Google**: enable it. It needs a Google OAuth client (Google Cloud Console → APIs & Services → Credentials → OAuth client ID, type *Web application*). Set its *Authorized redirect URI* to `https://<your-project-ref>.supabase.co/auth/v1/callback`, then paste the client ID and secret into Supabase. To restrict sign-in to your company, set the OAuth consent screen's user type to **Internal** (Google Workspace).
-3. **Authentication → URL Configuration**: set *Site URL* to your Vercel URL (you get it in step 3), and add `https://<your-vercel-domain>/**` to *Redirect URLs*. If sign-in bounces you back to the login page or to a localhost URL, this is almost always why.
-4. **Project Settings → API**: you'll copy the *Project URL*, the *anon* key and the *service_role* key into Vercel next.
+   9. `supabase/migrations/007_admin_managed_users.sql`
+   10. `supabase/migrations/008_stage2a_block5.sql`
+   11. `supabase/migrations/009_stage2b_contracts.sql`
+   12. `supabase/migrations/010_stage2b_finance.sql`
+   13. `supabase/migrations/011_stage2b_agent_access.sql` — **read its header first**: it tightens every existing policy so a future agent role cannot read staff data
+   14. `supabase/migrations/012_stage2b_benchmarks_shortlists.sql`
+   15. `supabase/seed_categories.sql` — loads the 12 inventory categories
+
+   If you ever paste a file twice into the same editor tab, or reuse a tab from a previous file without clearing it, Supabase will report an error from the *previous* file's content, not the one you meant to run — always paste into a fresh tab.
+
+2. **Project Settings → API**: you'll copy the *Project URL*, the *anon* key and the *service_role* key into Vercel next.
+
+There's no Google OAuth setup here — sign-in is email + password, with every account created by a Manager or CEO from the app's Users page (see step 4).
 
 ### 3. Deploy on Vercel
 Import the GitHub repo (the framework auto-detects as Next.js). Under **Environment Variables** add:
@@ -113,38 +133,48 @@ Import the GitHub repo (the framework auto-detects as Next.js). Under **Environm
 | `NEXT_PUBLIC_SUPABASE_URL` | Project URL | Public. **Must be set before the first build** (baked in at build time). |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | anon key | Public. Same: needed at build time. |
 | `SUPABASE_URL` | Project URL again | Server-only |
-| `SUPABASE_SERVICE_ROLE_KEY` | service_role key | **Server-only secret. Never prefix with `NEXT_PUBLIC_`.** |
-| `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN` | e.g. `yourcompany.com` | Optional; login hint and a friendly check |
+| `SUPABASE_SERVICE_ROLE_KEY` | service_role key | **Server-only secret. Never prefix with `NEXT_PUBLIC_`.** This key is what creates and manages user accounts — treat it like a master password. |
 | `ANTHROPIC_API_KEY` | your key | Only for Capture. `ANTHROPIC_MODEL` is optional. |
-| `GOOGLE_SERVICE_ACCOUNT_KEY` | the whole JSON key, on one line | Only for Drive filing |
-| `GOOGLE_SHARED_DRIVE_ID` | the Shared Drive's ID (from its URL) | Only for Drive filing |
+| `GOOGLE_SERVICE_ACCOUNT_KEY` | the whole JSON key, on one line | Only for Drive filing (unrelated to sign-in) |
+| `GOOGLE_SHARED_DRIVE_ID` | the Shared Drive's ID (from its URL) | Only for Drive filing and contract files |
+| `AGENT_ACCESS_ENABLED` | leave **unset** | The agent-portal release switch. Set to `1` only after a security review (see the Agent access section). |
 
-Deploy. If you change an env var later, **redeploy**: Vercel doesn't apply changes to existing deployments.
+Deploy. If you change an env var later, **redeploy**: Vercel doesn't apply changes to existing deployments. Also confirm **Root Directory** (Settings → General) points at the folder containing `package.json`, and **Framework Preset** shows **Next.js** — if the build succeeds but the app fails at runtime with "Configure the Output Directory," this is almost always why.
 
-### 4. First run: use the diagnostic
-1. Open **`https://<your-app>/api/health`**. It lists every environment variable (true/false, never the value), whether each migration has been run, whether categories are loaded, and whether an organisation and profile exist. Anything false tells you which step above to redo.
-2. Sign in with Google. You'll land on a **"signed in, but not set up yet"** screen with two ready-to-paste SQL snippets that already contain *your* user id. Run the first (it creates the organisation and makes you CEO), reload, and you're in. Everyone after you uses the second snippet with `'team'`, `'manager'` or `'ceo'`.
-3. Re-open `/api/health`: `session` should now show your role. Add **`?deep=1`** to also test real read access to the Google Shared Drive.
+### 4. First run: create your account, then everyone else's
+1. Open **`https://<your-app>/api/health`** first. It lists every environment variable (true/false, never the value), whether each migration has run, whether categories are loaded, and whether an organisation/profile exist. Anything false tells you which step above to redo.
+2. **Create your own account** — the very first one has no Manager/CEO yet to create it, so this one step uses the Supabase dashboard directly: **Authentication → Users → Add user**. Set your email and a password, and turn on **Auto Confirm User** (so it doesn't wait on an email you haven't configured sending for).
+3. Go back to the SQL editor and run, with your real email and the user's UUID from the Users list you just created:
+   ```sql
+   with org as (insert into organisations (name) values ('EmergeX') returning id)
+   insert into profiles (id, org_id, full_name, email, role_key)
+   select '<paste the UUID>', id, '<your name>', '<your email>', 'ceo' from org;
+   ```
+4. Sign in at `https://<your-app>/login` with that email and password. You're now CEO.
+5. Everyone else: **Users** page in the app (visible to Manager/CEO only) → **+ New user** → name, email, role. A temporary password is generated and shown once — copy it and send it to them however you'd send any password. They can change it themselves after signing in (**Change password** at the bottom of the sidebar).
 
-### 5. Google Drive (optional — everything works without it)
+### 5. Google Drive (optional — unrelated to sign-in, everything works without it)
 Google Cloud Console → enable the **Drive API** → create a **service account** → create a JSON key. In Google Drive, open the Shared Drive → *Manage members* → add the service account's email as **Content Manager**. Put the JSON in `GOOGLE_SERVICE_ACCOUNT_KEY` and the drive ID in `GOOGLE_SHARED_DRIVE_ID`, redeploy, then check `/api/health?deep=1`. Without Drive, records and exports still work; exports just aren't filed, and the app tells you so.
 
 ### If something goes wrong
 | You see | Most likely cause |
 |---|---|
 | Build fails on Vercel | Read the last red lines of the build log. Most often a missing `NEXT_PUBLIC_*` variable, or files missing from the upload (check every batch landed). |
-| `/api/health` says a migration check is false | That SQL file wasn't run, or errored. Run it and re-check. Files must go in the order above. |
-| Sign-in loops back to the login page | Supabase *Site URL* / *Redirect URLs* don't match your Vercel domain (step 2.3). |
-| Signed in, but `/api/health` says `signedIn: false` | The server can't read your session cookie. Check the two `NEXT_PUBLIC_SUPABASE_*` values match your project, then redeploy. **This is the one flow that couldn't be tested before shipping (see below).** |
-| "Signed in, but not set up yet" | Expected on first login. Run the SQL snippet shown. |
-| Every action returns 403 | The user has no `profiles` row, or the wrong role. |
+| Build succeeds, but the deployed app errors immediately | Check Root Directory / Framework Preset (step 3) if it's a "configure the output directory" message; check env vars if it's a Supabase client error in the browser console. |
+| `/api/health` says a migration check is false | That SQL file wasn't run, or errored. Run it and re-check. Files must go in the order above, each in a fresh SQL editor tab. |
+| Signed in, but `/api/health` says `signedIn: false` | The server can't read your session cookie. Check the two `NEXT_PUBLIC_SUPABASE_*` values match your project, then redeploy. **This is the one flow that couldn't be tested before shipping — see "What hasn't been verified" below.** |
+| "Signed in, but not set up yet" | Expected only for the very first account. Run the SQL snippet in step 4.3. Everyone after that gets a profile automatically when created from the Users page. |
+| Login says "Unsupported provider" | Leftover from trying Google sign-in — this build doesn't use it. Use the email/password form. |
+| Every action returns 403 | The user has no `profiles` row, or the wrong role for that action. |
+| "Unsupported provider: provider is not enabled" | Same as above — not applicable to this build. |
 | Capture says the AI call failed | `ANTHROPIC_API_KEY` is missing or invalid. |
+
 | Export works but "Not filed in Drive" | Drive isn't configured, or the service account isn't a member of the Shared Drive. See `/api/health?deep=1`. |
 | A CSV import stops partway | It's sent in batches of 20 and the message says where it stopped. Re-running is safe: existing vendors/properties are matched by name. |
 
 ## Stage 2A progress
 
-Blocks 1, 2, 3 and 4 of 6 are built.
+All 6 blocks are built. (Stage 2A is now complete — see Stage 2B below for what comes after it.)
 
 **Block 1**: A1 (Manager/CEO split), A2 (margin bands per tier), A3 (proposal record), A4 (add items), A6 (best valid cost), A9 (margin stack), A12 (approval chain).
 
@@ -182,6 +212,123 @@ Blocks 1, 2, 3 and 4 of 6 are built.
 - **My reading of A24** ("a competing route in the same market"): the item was already sent to a *competing brand* in the same market. If either side's market isn't recorded it's flagged (conservative) and says so.
 - **Shares logged after the fact** (pasted from a chat) are never blocked, since it already happened. They're recorded with the conflict flagged.
 - **A fix from this pass:** the add-line response was returning the tier's margin band and market-intel prices to Team (in the "warnings" text), quietly undoing the D10 rule. It's now margin-permission only, and the end-to-end suite asserts it.
+
+**Block 5** (pipeline, won/lost, CEO view):
+- ✅ **A26 — items move out of `available` on Sent**: the first time a proposal reaches Sent (not on later re-saves), each line's item flips to `proposed`. A second move through Sent (e.g. Sent → Negotiating → Sent again) doesn't re-touch it.
+- ✅ **A30 — transacted prices written back on Won**: the actual cost used becomes a `transacted` price record on the item, which now correctly outranks `rack`/`quote`/`negotiated` for the next `bestValidCost()` lookup — verified directly: added the same item to a second proposal afterward and confirmed the resolved cost source was specifically the new `transacted` record, not the older `rack` record that happened to have the same amount (a coincidental-equal-amount check wouldn't have proven this; tracing `cost_source_price_record_id` back to its `type` does).
+- ✅ **Items also move to `sold` on Won.** Not explicitly named in the PRD's A-list, but a reasonable completion of the lifecycle (`available → proposed → sold`) — otherwise a won item stays marked `proposed` forever. Flagging this as inference, not PRD text.
+- **Two real bugs, caught only by running this against real Postgres, not by review:** the transacted-price write-back was missing `org_id` (a `NOT NULL` violation that failed *silently* until I added error-checking — it would have shipped broken); and my first idempotency approach used `upsert` targeting a partial unique index, which Postgres won't match unless the `ON CONFLICT` clause itself repeats the partial index's `WHERE` condition — something `supabase-js`'s `upsert` can't express. Replaced with an explicit check-then-insert, which also IS the idempotency guarantee now, not just a fast path in front of one.
+- ✅ **A27 — pipeline view** (`/pipeline`): Kanban by stage. `value` (brand-facing total) is visible to everyone; `net_margin_pct` is `null` unless the caller holds `margin.view` — tested as an explicit assertion (Team's response has every `net_margin_pct` as `null`; Manager's doesn't), not just "the endpoint returns 200."
+- ✅ **A28 — won/lost analysis**: by brand, agent, market, category, and loss reason, all on the same pipeline page.
+- ✅ **A32 — CEO sign-off queue**: a line appears once a Manager has set its margin and disappears once a CEO has confirmed or overridden it — defined as "the most recent pricing action on this line was a Manager's, not a CEO's," not a static flag. Tested as a real before/after state change (line present → CEO confirms → line gone), not just that the endpoint returns something.
+- ✅ **A33 — CEO View** (`/ceo-view`): all four PRD 6.14 quadrants — inventory (value/expiring/edge/stale), brands & agents (route mix, conflict counts), pricing (the sign-off queue + recent vendor rate changes), team (recent `audit_events` + pending-approval counts).
+- ✅ **`ceo_view.access` confirmed CEO-only, not Manager** — this was the one permission boundary in the whole build most likely to get fat-fingered (Manager already holds almost every other permission via the additive role design), so it got its own explicit test: Manager gets 403 from `/api/ceo-view`, same as Team.
+
+**Block 6**:
+- ✅ **A34 — notifications, built as the PRD's own fallback** ("Dashboard lists plus a weekly email" when time is short): `/notifications` aggregates due/stale records, pending approvals, stalled proposals (no stage change in 7+ days), upcoming contract renewals, and overdue deliverables into one triaged feed. The email half isn't built — no SMTP is configured anywhere in this project, and adding one wasn't asked for.
+- ⬜ **A17 (PowerPoint export) — deliberately not built**, per the PRD's own cut-list: Excel-only, which already exists.
+
+## Stage 2B — contracts, deliverables & finance
+
+Built: **B1** (a contract per Won deal, `final_amount` computed from the proposal's own brand-facing line totals rather than re-entered by hand), **B2** (deliverables with due dates, owners, and a pending/done status), **B4** (renewal dates feed straight into the Notifications page).
+
+**A real bug, caught only by running it, not by review:** `deliverables` has two foreign keys into `profiles` (`owner_id` and `created_by`). A bare `profiles(full_name)` embed is ambiguous to PostgREST — it has to be told which relationship via the constraint name (`profiles!deliverables_owner_id_fkey(...)`). The query was erroring, and because the error wasn't checked, it silently looked like "this contract has no deliverables" instead of "this query failed" — a newly-created deliverable would have appeared to vanish. After finding it, I searched the rest of the codebase for the same unqualified pattern against any table with more than one FK into `profiles` (`share_conflict_overrides`, `reconfirmation_overrides`, `route_score_changes` all have two) — those were already correctly disambiguated from earlier passes; `deliverables` was the one actual miss.
+
+**Decisions made here:**
+- **Creating a contract and adding/editing deliverables needs `contract.manage`** (Manager/CEO) — but **marking a deliverable done only needs `record.update`**, which Team already holds. Ticking off completed work is operational, not a contract-terms change.
+- **One contract per deal**, enforced by a unique constraint, not just application logic.
+- **`final_amount` is the brand-facing total**, same visibility rule as the pipeline's `value` column (D10) — it's not margin, so there's no permission gate on reading it.
+
+**Finance is documented in its own section below; the rest of 2B (B3, B12–B22) is listed under "What's still missing" above.**
+
+
+### Finance: billing, payments, payables, overdue, export (B6–B11)
+
+- ✅ **B6/B7 — billing schedule → receivables.** From a contract, generate N draft invoices that sum to **exactly** the contract total. All money maths is done in integer cents; leftover cents go on the last instalment; each due date is computed from the *first* date, so a 31 January start stays on month-ends (31 Jan, 29 Feb, 31 Mar). Backed by a 2,000-case property test (instalments always sum to the total, none negative). Billed to the brand by default, or to an agent ("receivables from brands or agents", PRD 6.15). One schedule per contract; void its invoices to regenerate.
+- ✅ **B9 — payments.** Partial and full. **The database itself refuses** an overpayment, a payment on a draft/void invoice, and voiding an invoice that has payments — tested directly against Postgres, so a bug or a race in the app can't corrupt the books (a row lock serialises two payments arriving together). "Paid / part paid / overdue" are *derived* from the payments and due date, never stored, so they can't drift.
+- ✅ **B10 — overdue list and chase reminders.** Overdue = issued, still owed, past due. Logging a chase clears the reminder for 7 days. The reminder is in-app (Finance page, invoice page, Notifications) — no email, since no SMTP exists in this project.
+- ✅ **B8 — payables.** One bill per vendor (the sum of the real cost × quantity of that vendor's lines) plus one to the agent for their commission. A *fixed-fee* agent is paid the fee **once** — their cut is stored on every line, so naively summing it would pay them once per line (caught and unit-tested). Items whose property has no vendor are grouped under "Unassigned vendor" and flagged, never silently dropped.
+- ✅ **B11 — CSV export** (receivables, payables, payments). **D11 (which accounting tool, and push vs export) is undecided in the PRD**, so this is a plain tool-agnostic CSV. It neutralises spreadsheet formula injection (a text cell starting `=`, `+`, `-` or `@` gets a leading `'`) — vendor and brand names are typed by users and flow straight into these files.
+
+**Decisions to review:**
+- **All finance data is behind one permission, `finance.manage` (Manager/CEO). Team sees none of it** — no RLS policy for them at all (not a hidden column), and money never appears in Team's Notifications (tested). Generating payables additionally needs `margin.view`, since it reads vendor cost and agent cuts — the same margin-side data Team is already kept from (D10). If you'd rather Team could *view* receivables, that's one RLS policy and one permission check.
+- **Payments can't be edited or deleted** — only recorded. A mistaken payment currently needs a database fix; a reversal flow wasn't asked for and is a real piece of accounting design, not a quick add.
+- **A payable is "approved" with the same Issue action as an invoice**, and needs a due date to be approved.
+
+**Not verified here:** none of this has been clicked through in a browser, and the CSVs haven't been opened in Excel/your accounting tool.
+
+## Stage 2B — agent access (B12–B17) and contract files (B3)
+
+> ### ⚠️ Do not turn the agent portal on until a person has reviewed it
+> PRD 6.16: agent access is *"released only after a security review"* (B15). **I can build and run the access tests; I cannot be the independent reviewer, and nothing here claims to be one.** So the portal ships **OFF**: it only works when the `AGENT_ACCESS_ENABLED` environment variable is `1`. You can create agent logins and share items while it's off (to prepare); agents just can't use any data route. `/api/health` shows which state you're in. The review checklist is below.
+
+**What was built**
+- **B12 — agent accounts.** A new external role, `agent`, belonging to an *agent company* (`profiles.agent_id`; the database enforces that exactly agent users have one, in the same organisation). Created from **Users** (Manager/CEO). An agent account can never change role — disable it and create a new one. Agents use a separate portal at `/agent`; the staff app redirects them there.
+- **B13 — sharing.** **Agent access** page: tick items (or a whole property → its *current* items), optionally set a white-label title and an indicative price. Revoking is immediate and permanent (a revoked grant's id stays dead; re-sharing makes a new one).
+- **B14 — the agent's view.** Item name/white-label title, category, market, event dates, offer expiry, availability, a small set of allow-listed attributes, and a price **only if you typed one**. Never vendor, cost, margin, price history, route scores, share logs, other agents, or internal intel.
+- **B16 — agent intel.** Lands unrated and pending. A price an agent *claims* creates **no** price record until a reviewer accepts the note (market-intel prices feed the "above market price" warnings, so an unreviewed number must not reach them). Reviewed exactly once. The agent sees a status, never the rating.
+- **B17 — activity log.** Every inventory/item/intel view is recorded, append-only in the database (not even the service layer can alter it), and readable on the Agent access page.
+- **B3 — contract files.** On each contract: versioned documents in the Shared Drive, one marked current per document, identical re-uploads ignored, roll back with "Make current". **Unlike a proposal export, if Drive can't take the file the upload is refused and nothing is recorded** (a contract exists nowhere else). Content-checked (a renamed `.exe` isn't a `.pdf`), 4 MB limit (the serverless request limit), `contract.manage` only.
+
+**How agents are kept out — three independent layers**
+1. **Database (RLS).** Until now every policy only asked "same organisation?". Every existing `SELECT` policy now also requires `is_internal()`; agents can read exactly one row — their own profile. There are no insert/update/delete policies at all.
+2. **Server (`requireProfile`).** It now **refuses external users by default**. All ~79 routes call it with no arguments, so a route someone forgets to protect is still closed. Only `/api/agent/*` and `change-password` opt in.
+3. **Field allow-list.** What an agent receives is built by one pure function (`src/lib/agentView.ts`) that names every permitted field — an allow-list, so a sensitive field added later is hidden by default.
+
+**B15 — the access tests (this is what *was* verified):**
+- **A sweep that auto-discovers every route** (79 routes, 95 handlers) and proves each refuses an agent (403) and an anonymous visitor (401), that agent routes refuse staff, and that the hostile requests wrote nothing except the two views that are logged by design. It fails if it can't find the routes, and a future route is covered automatically.
+- **The database, as a real agent login:** 35 populated tables return zero rows; 14 structural guarantees (every select policy requires `is_internal()`, no write policies exist, the only `SECURITY DEFINER` functions are the four known helpers and each pins its `search_path`, an agent can't promote themselves or switch company, the activity log can't be altered, …). `supabase/tests/agent_access.sql` (self-contained) and `agent_rls_sweep.sql` (run it on a database that holds data — on an empty one it proves nothing, and says so).
+- **Leak scans:** a planted vendor name, cost, contact, brand names, another agent's name and an internal note must appear nowhere in any agent response; the item view must contain *exactly* the documented keys.
+- **Probing:** another agent's grant, a made-up id and a malformed id return identical 404s; revoked grants are 404 on the next request; disabled accounts are refused immediately (a ban doesn't invalidate a token already issued, so `profiles.disabled` is checked too).
+- **The tests were themselves tested.** I broke the security six ways and confirmed each was caught by the test meant to catch it: a policy missing `is_internal()` (the all-tables sweep *and* the structural check), `vendor_name` added to the allow-list, the external-user deny removed, the agent scope removed from item lookup, and the revoked-grant check removed. (Four extra e2e failures in that run were honest knock-ons of the revocation break.)
+- **Two real defects found by these tests, both fixed:** agents were blocked from changing their *own* password (the sweep had to allow-list that route, so only an explicit check exposed it); and `safeFilePart` let `..` runs and leading dots through into filenames.
+
+**Decisions to review**
+- **D12 (what an agent sees) is undecided in the PRD — this is my default, deliberately conservative:** no price unless you type one per item; "proposed", "sold" and "on hold" all show as "Not currently available" (telling an agent *which* would reveal other parties' deals); attributes only from an allow-list that excludes anything naming the source (`vendor_name`, `management_contact`, `fleet_operator`, `league_name`, …). **Item and property names are shown as typed** — set a white-label title if a real name identifies its source.
+- Sharing is **per item** (a property expands to its current items; later additions aren't shared automatically). Marking things shareable, reading activity, and reviewing intel are Manager/CEO (`agent.share.manage`, `agent.intel.review`). Contract files are `contract.manage` only — they can contain agent cuts.
+- Each agent company is capped at **50 notes awaiting review**; notes are 2,000 characters max.
+
+**Checklist for whoever does the security review — known limits, in plain terms**
+1. **Never run against real Supabase Auth or a real Drive.** RLS was tested on a real PostgreSQL 16 using a stand-in for `auth.uid()`; Drive was an in-memory fake. Verify on a staging project: sign in as an agent and try `supabase.from('price_records').select()` in the browser console — it must return nothing.
+2. **Creating an agent login** calls Supabase's Auth Admin API, which couldn't run here (only the validation around it was tested).
+3. **`SECURITY DEFINER` helpers** (`current_org`, `current_role_key`, `has_permission`, `is_internal`) are assumed to run with RLS bypassed (true for the normal `postgres` owner); they're existing, caller-scoped and pinned.
+4. **`/api/account/change-password` doesn't ask for the current password** (pre-existing design); anyone holding a live session can change it. Worth tightening before agents exist.
+5. **`/api/health` is public by design** (it must work before anyone can sign in); it exposes only booleans, but consider restricting it after setup.
+6. **Reference tables** (`categories`, `roles`, `permissions`, `role_permissions`) have no RLS and are readable with the public key — no business data, but they reveal the permission model.
+7. **No general rate limiting** beyond the 50-note cap; consider Vercel's protections for the agent routes.
+8. **Fail-closed logging** is proven at the function level (a failed log write rejects with "not shown"); I did not force a database failure through a live route.
+9. **Concurrent contract uploads** are safe (tested: distinct versions, one current) but can leave an orphaned copy in Drive.
+10. The activity log records *what* was viewed and by whom, not IP address or device.
+
+
+## Stage 2B — price benchmarks and shortlists (B18–B20, B22)
+
+This completes Stage 2B **except B21 (matching suggestions from a brief), which is deliberately not built**: the PRD says it comes last "once there is enough history", and its own cut-list says to drop it in favour of saved filters and shortlists, because thin data makes suggestions weak.
+
+**What was built**
+- **B18 — benchmarks** (`/benchmarks`). Typical cost ranges (low, 25th–75th percentile, median, high) from your own price history, filterable by category, market, vendor, unit, currency, days-to-event and recency. Computed in SQL (`price_benchmark()`, exact percentiles); TypeScript reproduces the same numbers, and a test asserts they agree.
+- **B19 — price curve.** Per property: prices against days before the event, with median per band (0–7, 8–30, 31–60, 61–90, 91–180, 181+ days).
+- **B20 — brand tier in the range.** Choose a brand and each range gains a **suggested sell range** = the cost quartiles plus that brand's tier margin band. Manager/CEO only (the band is Management-only data): Team asking for it is **refused with a 403, not silently ignored**.
+- **B22 — saved filters and shortlists** (`/shortlists`). Search the inventory, save the filter, collect items in named shortlists, and add a whole shortlist to a proposal from the proposal page (it uses the existing add-line endpoint, so every pricing rule still applies and failures are listed with the reason). Private by default; shareable **read-only**; only the owner can change or delete.
+
+**Rules the code enforces — and the tests prove**
+- **Like for like.** One result row per *(pricing unit, currency)*. A per-match price is never averaged with a season fee; USD is never mixed with EUR. No currency conversion is attempted.
+- **Honest about thin data.** Under 3 prices there is no range — the single value is shown with its sample size and nothing is suggested from it. Confidence is labelled (insufficient / low / moderate / good).
+- **Days-to-event is never guessed.** A recorded value is used; otherwise it's derived from the property's event date; a price with neither is left *out* of any days filter (and counted on the curve). A price recorded after the event started is excluded from the curve and counted.
+- **Market-intel prices are a separate reference**, never part of the cost range (and never reach best-valid-cost, as before).
+- **Advisory only.** Nothing here changes a price, a margin or a proposal.
+- **No arbitrary data in saved filters.** Criteria are whitelisted (category, market, vendor, availability, text, stale-only); unknown keys, wrong types, arrays and over-long values are refused with a clear error rather than stored.
+- **Access.** Staff only: every table has RLS and no write policies, an agent reads nothing from them, and the all-routes sweep (now 88 routes) proves the new endpoints refuse agents and anonymous visitors without anyone having to remember to add them.
+
+**Testing, including the tests being tested.** 10 SQL checks use hand-computed numbers (10k/20k/30k/40k → quartiles 17,500 / 25,000 / 32,500) and cover unit/currency separation, the derived-days logic, organisation isolation and the shortlist privacy rules; 12 pure checks; 9 end-to-end steps. I then broke it four ways — the SQL mixing currencies, the sell-range arithmetic, the tier permission check, and the owner-only check on shared lists — and each break was caught by exactly the test meant to catch it. Two of my own *expected values* were wrong before the first end-to-end run (a `max_days` filter does not exclude a price recorded *after* the event; I also wrote one nonsense expression); I fixed the tests, not the code, after checking the arithmetic.
+
+**Limits to know about**
+- **Thin data gives weak numbers, whatever the maths.** Until you have a few prices per category/market, most groups will show "insufficient". That's the correct answer, not a bug.
+- **Every price record counts once**, so an item re-priced often weighs more than one priced once, and a won deal appears twice (its cost and its transacted price). Both are noted on the page. A smarter weighting is a design decision, not a quick change.
+- **Item search** applies the text box after fetching up to 500 matches (then shows 200); a very broad search tells you it was truncated.
+- A shortlist holds at most 200 items and a person at most 50 shortlists / 100 filters — the caps are in the code but the 200-item cap is not exercised by a test.
+- **Not verified in a browser**: the three new screens (including the SVG price curve) have been type-checked and built, not looked at.
+
 
 ## Architecture notes for whoever builds Stage 2A next
 
