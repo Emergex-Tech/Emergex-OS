@@ -15,9 +15,10 @@
     "@googleapis/drive": "^26.0.1",
     "@supabase/ssr": "^0.5.1",
     "@supabase/supabase-js": "^2.45.0",
+    "eslint-config-next": "14.2.35",
     "exceljs": "^4.4.0",
     "google-auth-library": "^11.1.0",
-    "next": "14.2.5",
+    "next": "14.2.35",
     "papaparse": "^5.4.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
