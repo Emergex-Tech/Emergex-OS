@@ -105,6 +105,11 @@ async function main() {
     benchmarks: await load('benchmarks'), benchCurve: await load('benchmarks/curve'), itemSearch: await load('items/search'),
     savedFilters: await load('saved-filters'), savedFilterById: await load('saved-filters/[id]'), shortlists: await load('shortlists'),
     shortlistById: await load('shortlists/[id]'), shortlistItems: await load('shortlists/[id]/items'), shortlistItem: await load('shortlists/[id]/items/[itemId]'),
+    projects: await load('projects'), projectsBackfill: await load('projects/backfill'), projectById: await load('projects/[id]'), projectParent: await load('projects/[id]/parent'),
+    checklistAdd: await load('projects/[id]/checklist'), checklistItem: await load('projects/[id]/checklist/[itemId]'), parties: await load('projects/[id]/parties'),
+    partyById: await load('projects/[id]/parties/[partyId]'), comms: await load('projects/[id]/communications'), commResolve: await load('projects/[id]/communications/[cid]/resolve'),
+    templates: await load('checklist-templates'), templateItems: await load('checklist-templates/[key]/items'), templateItemById: await load('checklist-template-items/[id]'),
+    makeGood: await load('deliverables/[id]/make-good'), invAdj: await load('deliverables/[id]/invoice-adjustment'),
     files: await load('contracts/[id]/files'), fileById: await load('contracts/[id]/files/[fileId]'), changePw2: await load('account/change-password')
   }
 
@@ -457,9 +462,11 @@ async function main() {
     assert.equal(detail.json.deliverables.length, 1)
     assert.equal(detail.json.brand_name, 'Blitz')
 
-    const toggled = await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { status: 'done' }, params: { id: S.deliverableId } })
+    // The old pending/done toggle is gone: status now FOLLOWS the delivered quantity, so Team records what was delivered.
+    assert.equal((await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { status: 'done' }, params: { id: S.deliverableId } })).status, 403, 'setting a status directly needs Manager/CEO — and then only "missed"')
+    const toggled = await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 1 }, params: { id: S.deliverableId } })
     assert.equal(toggled.status, 200, JSON.stringify(toggled.json))
-    assert.equal(toggled.json.status, 'done')
+    assert.equal(toggled.json.status, 'delivered'); assert.equal(toggled.json.pct, 100)
   })
   await step('B4 + notifications: an overdue (not-done) deliverable and a near-term renewal both surface; a DONE overdue deliverable does not', async () => {
     // The deliverable above was due 2020-01-01 (overdue) but is now 'done' — it must NOT appear as overdue.
@@ -1055,6 +1062,275 @@ async function main() {
     assert.equal((await call(H.shortlistById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.sl } })).status, 200)
     assert.equal(await count('shortlist_items', { shortlist_id: S.sl }), 0, 'deleting a shortlist removes its items')
     assert.equal((await call(H.shortlistById.GET, { as: TEAM, params: { id: S.sl } })).status, 404)
+  })
+  console.log('\nStage 3 — live projects: checklist, parties, communication log, delivery tracking (L1–L10, L28, L29)')
+  const items = (d: any) => d.json.checklist.phases.flatMap((p: any) => p.items) as any[]
+  const item = (d: any, title: string) => items(d).find((i: any) => i.title === title)
+  const proj = (id: string, as = TEAM) => call(H.projectById.GET, { as, params: { id } })
+  const flat = async (key: string) => (await svc.from('checklist_template_items').select('id').eq('template_key', key).eq('active', true)).data!.length
+  const winDeal = async (cat: string, label: string) => {
+    const pr = await call(H.properties.POST, { as: TEAM, method: 'POST', body: { name: `S3 ${label}`, category_key: cat, market: 'S3land', vendor_id: S.vendor, attributes: {} } }); assert.equal(pr.status, 201, JSON.stringify(pr.json))
+    const it = await call(H.items.POST, { as: TEAM, method: 'POST', body: { property_id: pr.json.id, name: `S3 item ${label}` } })
+    await call(H.prices.POST, { as: TEAM, method: 'POST', body: { item_id: it.json.id, type: 'rack', amount: 5000, currency: 'USD' } })
+    const p = await call(H.proposals.POST, { as: TEAM, method: 'POST', body: { brand_id: S.Blitz, route_id: S.rBlitz } }); const line = await call(H.lines.POST, { as: TEAM, method: 'POST', body: { item_id: it.json.id }, params: { id: p.json.id } })
+    await call(H.margin.PATCH, { as: MANAGER, method: 'PATCH', body: { rate: 20 }, params: { id: p.json.id, lineId: line.json.id } })
+    for (const st of ['Approved', 'Sent', 'Won']) assert.equal((await call(H.stage.PATCH, { as: MANAGER, method: 'PATCH', body: { to_stage: st }, params: { id: p.json.id } })).status, 200, st)
+    const deal = (await svc.from('deals').select('id').eq('proposal_id', p.json.id).single()).data!.id
+    const project = (await svc.from('projects').select('id').eq('deal_id', deal).maybeSingle()).data
+    return { proposalId: p.json.id as string, dealId: deal as string, projectId: project?.id as string }
+  }
+
+  await step('L1: every Won deal already has exactly ONE project, built automatically — template chosen by category, checklist copied, parties derived', async () => {
+    assert.equal(await count('projects'), await count('deals'), 'one project per Won deal, no deal missed')
+    const mine = (await svc.from('projects').select('id, template_key, name').eq('deal_id', S.dealId).single()).data!
+    assert.equal(mine.template_key, 'short', 'an OOH/LED property takes the Short template'); assert.ok(mine.name.startsWith('Blitz — '))
+    S.pShort = mine.id
+    const d = await proj(S.pShort); assert.equal(d.status, 200, JSON.stringify(d.json))
+    assert.equal(items(d).length, await flat('short'), 'the whole Short template was copied'); assert.deepEqual(d.json.checklist.phases.map((p: any) => p.phase_no), [1, 2, 3])
+    const roles = d.json.parties.map((x: any) => `${x.role}:${x.name}`).sort()
+    assert.deepEqual(roles, ['brand:Blitz', 'brand_route:Direct (no agent)', 'emergex_owner:team user', 'vendor:Apex Sports Media'], 'brand, route, EmergeX owner (the proposal\'s creator) and the vendor')
+    assert.ok(d.json.parties.every((x: any) => ({ brand: 'brand', brand_route: 'brand', emergex_owner: 'emergex', vendor: 'delivery' } as any)[x.role] === x.side))
+    assert.equal(d.json.project.owner_name, 'team user'); assert.equal(d.json.project.brand_name, 'Blitz'); assert.equal(d.json.project.template_name, 'Short')
+
+    const full = await winDeal('team', 'team category'); S.pFull = full.projectId; S.dealFull = full.dealId; S.propFull = full.proposalId
+    assert.ok(S.pFull, 'the Won hook created the project'); const fd = await proj(S.pFull)
+    assert.equal(fd.json.project.template_name, 'Full'); assert.equal(items(fd).length, await flat('full')); assert.deepEqual(fd.json.checklist.phases.map((p: any) => p.phase_no), [1, 2, 3, 4])
+
+    const again = await call(H.projects.POST, { as: MANAGER, method: 'POST', body: { deal_id: S.dealFull } }); assert.equal(again.status, 200); assert.equal(again.json.created, false); assert.equal(again.json.id, S.pFull)
+    assert.equal(await count('projects', { deal_id: S.dealFull }), 1, 'creating it again is a no-op')
+    assert.equal((await call(H.projects.POST, { as: TEAM, method: 'POST', body: { deal_id: S.dealFull } })).status, 403)
+    assert.equal((await call(H.projects.POST, { as: MANAGER, method: 'POST', body: { deal_id: 'nope' } })).status, 400); assert.equal((await call(H.projects.POST, { as: MANAGER, method: 'POST', body: { deal_id: NIL } })).status, 404)
+    assert.ok((await call(H.projects.GET, { as: TEAM })).json.some((p: any) => p.id === S.pFull && p.brand_name === 'Blitz'))
+    assert.equal((await proj(NIL)).status, 404); assert.equal((await proj('nope')).status, 404)
+  })
+
+  await step('L1 repair: a deal with no project is found and fixed by the backfill (Manager only, idempotent)', async () => {
+    await svc.from('projects').delete().eq('id', S.pShort)   // simulate a deal won before Stage 3, or a failed automatic creation
+    assert.equal((await call(H.projectsBackfill.GET, { as: TEAM })).json.missing, 1)
+    assert.equal((await call(H.projectsBackfill.POST, { as: TEAM, method: 'POST' })).status, 403)
+    const fix = await call(H.projectsBackfill.POST, { as: MANAGER, method: 'POST' }); assert.equal(fix.status, 200, JSON.stringify(fix.json)); assert.deepEqual([fix.json.created, fix.json.failed.length, fix.json.remaining], [1, 0, 0])
+    assert.equal((await call(H.projectsBackfill.POST, { as: MANAGER, method: 'POST' })).json.created, 0, 'running it again creates nothing')
+    S.pShort = (await svc.from('projects').select('id').eq('deal_id', S.dealId).single()).data!.id; assert.equal(items(await proj(S.pShort)).length, await flat('short'), 'rebuilt with its full checklist')
+  })
+
+  await step('L5: checklist items — update, owner, due date, notes; N/A needs a reason; custom items; template steps cannot be removed; staff-only owners', async () => {
+    const d0 = await proj(S.pFull); const first = item(d0, 'Brand assets and guidelines received')
+    const patch = (id: string, body: unknown, as = TEAM) => call(H.checklistItem.PATCH, { as, method: 'PATCH', body, params: { id: S.pFull, itemId: id } })
+    const done = await patch(first.id, { status: 'done' }); assert.equal(done.status, 200, JSON.stringify(done.json))
+    const after = item(done, 'Brand assets and guidelines received'); assert.equal(after.effective_status, 'done'); assert.ok(await count('project_checklist_items', { id: first.id, completed_by: TEAM }))
+    assert.equal((await patch(first.id, { status: 'open' })).json.checklist.phases[1].items.find((i: any) => i.id === first.id).effective_status, 'open', 'un-ticking clears it')
+    assert.equal(await count('project_checklist_items', { id: first.id, completed_by: null }), 1, 'and clears who/when')
+
+    const na = item(d0, 'Kick-off call held')
+    assert.equal((await patch(na.id, { status: 'na' })).status, 400, 'skipping a step needs a reason'); assert.equal((await patch(na.id, { status: 'na', na_reason: '   ' })).status, 400)
+    const ok = await patch(na.id, { status: 'na', na_reason: 'Brand declined a kick-off' }); assert.equal(item(ok, 'Kick-off call held').effective_status, 'na'); assert.equal(item(ok, 'Kick-off call held').na_reason, 'Brand declined a kick-off')
+    const p2 = ok.json.checklist.phases.find((p: any) => p.phase_no === 2); assert.equal(p2.na, 1); assert.equal(p2.pct, Math.round((p2.done / (p2.total - 1)) * 100), 'N/A is left out of the denominator')
+
+    assert.equal((await patch(first.id, { owner_id: MANAGER, due_date: '2030-05-01', notes: 'chase the brand' })).status, 200)
+    const owned = item(await proj(S.pFull), 'Brand assets and guidelines received'); assert.deepEqual([owned.owner_name, owned.due_date, owned.notes], ['manager user', '2030-05-01', 'chase the brand'])
+    assert.equal((await patch(first.id, { owner_id: AGENT_A })).status, 400, 'an agent can never own a checklist step'); assert.equal((await patch(first.id, { owner_id: NIL })).status, 400)
+    for (const bad of [{ due_date: '2030-02-30' }, { notes: 'x'.repeat(2001) }, { status: 'finished' }, {}]) assert.equal((await patch(first.id, bad)).status, 400, JSON.stringify(bad).slice(0, 40))
+    assert.equal((await patch(NIL, { status: 'done' })).status, 404)
+    assert.equal((await call(H.checklistItem.PATCH, { as: TEAM, method: 'PATCH', body: { status: 'done' }, params: { id: S.pShort, itemId: first.id } })).status, 404, 'an item cannot be reached through another project')
+
+    const add = await call(H.checklistAdd.POST, { as: TEAM, method: 'POST', body: { phase_no: 2, side: 'team', title: 'Book the photographer', due_date: '2030-06-01' }, params: { id: S.pFull } }); assert.equal(add.status, 201, JSON.stringify(add.json))
+    const custom = item(add, 'Book the photographer'); assert.deepEqual([custom.is_custom, custom.phase_name], [true, 'Onboarding and asset delivery'], 'joins the existing phase')
+    assert.equal((await call(H.checklistAdd.POST, { as: TEAM, method: 'POST', body: { phase_no: 2, side: 'vendor', title: 'x' }, params: { id: S.pFull } })).status, 400)
+    assert.equal((await call(H.checklistItem.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.pFull, itemId: first.id } })).status, 400, 'a template step is marked N/A, never removed')
+    const del = await call(H.checklistItem.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.pFull, itemId: custom.id } }); assert.equal(item(del, 'Book the photographer'), undefined)
+    assert.equal(await count('project_checklist_items', { id: custom.id }), 1, 'archived, not deleted'); assert.equal(items(del).length, await flat('full'))
+  })
+
+  await step('L6: paperwork items tick THEMSELVES from the contract and invoice records — and REOPEN if those records change', async () => {
+    const st = async (title: string) => { const d = await proj(S.pFull); const i = item(d, title); return `${i.effective_status}${i.auto_satisfied ? '/auto' : ''}` }
+    const t = ['Contract created', 'Signed contract filed', 'Billing schedule set up', 'First invoice issued', 'First payment received', 'All invoices paid']
+    assert.deepEqual(await Promise.all(t.map(st)), ['open', 'open', 'open', 'open', 'open', 'open'], 'nothing is ticked before any paperwork exists')
+
+    const ctr = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: S.dealFull, renewal_date: '2031-01-01' } }); assert.equal(ctr.status, 201, JSON.stringify(ctr.json)); S.ctrFull = ctr.json.id
+    assert.equal(await st('Contract created'), 'done/auto'); assert.equal(await st('Signed contract filed'), 'open')
+    useFakeDrive()
+    try { const f = new FormData(); f.append('file', new File([new Uint8Array(PDF('s3'))], 'signed.pdf', { type: 'application/pdf' })); assert.equal((await call(H.files.POST, { as: MANAGER, method: 'POST', form: f, params: { id: S.ctrFull } })).status, 201) } finally { restoreDrive() }
+    assert.equal(await st('Signed contract filed'), 'done/auto')
+
+    const sch = await call(H.schedule.POST, { as: MANAGER, method: 'POST', body: { installments: 2, first_due_date: '2030-01-01' }, params: { id: S.ctrFull } }); assert.equal(sch.status, 201, JSON.stringify(sch.json))
+    assert.equal(await st('Billing schedule set up'), 'done/auto'); assert.equal(await st('First invoice issued'), 'open', 'drafts are not issued')
+    for (const i of sch.json.invoices) assert.equal((await call(H.invoiceById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'void' }, params: { id: i.id } })).status, 200)
+    assert.equal(await st('Billing schedule set up'), 'open', 'REOPENED: voiding the whole schedule un-ticks it')
+    const sch2 = await call(H.schedule.POST, { as: MANAGER, method: 'POST', body: { installments: 2, first_due_date: '2030-01-01' }, params: { id: S.ctrFull } }); assert.equal(sch2.status, 201)
+    assert.equal(await st('Billing schedule set up'), 'done/auto', 'and ticks again once a new one exists')
+    const [a, b] = sch2.json.invoices.map((i: any) => i.id)
+    assert.equal((await call(H.invoiceById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'issue' }, params: { id: a } })).status, 200); assert.equal(await st('First invoice issued'), 'done/auto'); assert.equal(await st('First payment received'), 'open')
+    assert.equal((await call(H.invoicePayments.POST, { as: MANAGER, method: 'POST', body: { amount: 1000 }, params: { id: a } })).status, 201); assert.equal(await st('First payment received'), 'open', 'a PART payment is not a payment received')
+    assert.equal((await call(H.invoicePayments.POST, { as: MANAGER, method: 'POST', body: { amount: 2000 }, params: { id: a } })).status, 201); assert.equal(await st('First payment received'), 'done/auto'); assert.equal(await st('All invoices paid'), 'open', 'the second invoice is still unpaid')
+    assert.equal((await call(H.invoiceById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'issue' }, params: { id: b } })).status, 200); assert.equal((await call(H.invoicePayments.POST, { as: MANAGER, method: 'POST', body: { amount: 3000 }, params: { id: b } })).status, 201)
+    assert.equal(await st('All invoices paid'), 'done/auto')
+  })
+
+  await step('L6/L4: the commercial gate is tracked per SIDE — brand-side and team-side clear independently; Team sees the ticks but no finance amounts', async () => {
+    const g = async () => (await proj(S.pFull)).json.checklist.gate
+    assert.deepEqual(await g(), { brand: 'open', team: 'open', overall: 'open' }, 'the manual brand PO and the three team items are still open')
+    const d = await proj(S.pFull)
+    for (const t of ['Vendor or talent agreement signed', 'Vendor payment terms confirmed']) assert.equal((await call(H.checklistItem.PATCH, { as: TEAM, method: 'PATCH', body: { status: 'done' }, params: { id: S.pFull, itemId: item(d, t).id } })).status, 200)
+    assert.deepEqual(await g(), { brand: 'open', team: 'open', overall: 'open' }, 'one team item left')
+    const rights = item(d, 'Rights, usage and exclusivity confirmed with the vendor')
+    assert.equal((await call(H.checklistItem.PATCH, { as: TEAM, method: 'PATCH', body: { status: 'na', na_reason: 'Standard rights in the contract' }, params: { id: S.pFull, itemId: rights.id } })).status, 200)
+    assert.deepEqual(await g(), { brand: 'open', team: 'cleared', overall: 'open' }, 'the TEAM side is cleared while the BRAND side is not')
+    assert.equal((await call(H.checklistItem.PATCH, { as: TEAM, method: 'PATCH', body: { status: 'done' }, params: { id: S.pFull, itemId: item(d, 'Brand purchase order or written approval received').id } })).status, 200)
+    assert.deepEqual(await g(), { brand: 'cleared', team: 'cleared', overall: 'cleared' })
+    assert.equal((await proj(S.pFull)).json.checklist.phases[0].pct, 100)
+    const body = JSON.stringify((await proj(S.pFull, TEAM)).json); assert.ok(!/"amount"|"balance"|final_amount|margin/.test(body), 'the project page exposes finance only as ticks, never amounts')
+  })
+
+  await step('L28: parties — add (side follows from the role), duplicates refused, archive; owner reassigned by Manager and kept in step; owners must be staff', async () => {
+    const add = (body: unknown, as = TEAM, id = S.pFull) => call(H.parties.POST, { as, method: 'POST', body, params: { id } })
+    const a = await add({ role: 'delivery_agent', name: 'Gulf Delivery Agents', ref_type: 'agent', ref_id: CO_A, contact: 'ops@gulf.test' }); assert.equal(a.status, 201, JSON.stringify(a.json))
+    const ag = a.json.parties.find((x: any) => x.role === 'delivery_agent'); assert.deepEqual([ag.side, ag.name, ag.contact], ['delivery', 'Gulf Delivery Agents', 'ops@gulf.test'])
+    assert.equal((await add({ role: 'delivery_agent', name: 'Again', ref_type: 'agent', ref_id: CO_A })).status, 409, 'the same party twice in one role')
+    assert.equal((await add({ role: 'regulator', name: 'x' })).status, 400); assert.equal((await add({ role: 'vendor' })).status, 400); assert.equal((await add({ role: 'other', name: 'Consultant', side: 'mars' })).status, 400); assert.equal((await add({ role: 'vendor', name: 'x', ref_id: CO_A })).status, 400, 'ref_id needs a ref_type')
+    assert.equal((await add({ role: 'other', name: 'Brand consultant', side: 'brand' })).status, 201)
+    const del = await call(H.partyById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.pFull, partyId: ag.id } }); assert.ok(!del.json.parties.some((x: any) => x.id === ag.id)); assert.equal(await count('project_parties', { id: ag.id }), 1, 'archived, not deleted')
+    assert.equal((await call(H.partyById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.pFull, partyId: ag.id } })).status, 404, 'already archived')
+    assert.equal((await add({ role: 'delivery_agent', name: 'Gulf again', ref_type: 'agent', ref_id: CO_A })).status, 201, 'archiving freed the slot')
+
+    const own = (body: unknown, as = MANAGER) => call(H.projectById.PATCH, { as, method: 'PATCH', body, params: { id: S.pFull } })
+    assert.equal((await own({ owner_id: MANAGER }, TEAM)).status, 403); const r = await own({ owner_id: MANAGER, name: '  Renamed project  ' }); assert.equal(r.status, 200, JSON.stringify(r.json))
+    assert.deepEqual([r.json.project.owner_name, r.json.project.name, r.json.parties.find((x: any) => x.role === 'emergex_owner').name], ['manager user', 'Renamed project', 'manager user'])
+    for (const bad of [{ owner_id: AGENT_A }, { owner_id: NIL }, { owner_id: 'nope' }, { name: '   ' }, { name: 'n'.repeat(201) }, {}]) assert.equal((await own(bad)).status, 400, JSON.stringify(bad).slice(0, 40))
+  })
+
+  await step('L2: upsells — link to the ORIGINAL; no loops, no chains; the parent shows them together with a combined delivery %', async () => {
+    const link = (id: string, parent: string | null, as = MANAGER) => call(H.projectParent.POST, { as, method: 'POST', body: { parent_project_id: parent }, params: { id } })
+    assert.equal((await link(S.pShort, S.pFull, TEAM)).status, 403)
+    assert.equal((await link(S.pFull, S.pFull)).status, 400, 'itself'); assert.equal((await link(S.pShort, NIL)).status, 404); assert.equal((await link(S.pShort, 'nope')).status, 400)
+    assert.equal((await link(S.pShort, S.pFull)).status, 200)
+    assert.equal((await svc.from('deals').select('parent_deal_id').eq('id', S.dealId).single()).data!.parent_deal_id, S.dealFull, 'the deal-level link is kept in step')
+    const third = await winDeal('ooh_led', 'third'); const chain = await link(third.projectId, S.pShort); assert.equal(chain.status, 400); assert.match(chain.json.error, /itself an upsell/, 'upsell of an upsell')
+    const loop = await link(S.pFull, S.pShort); assert.equal(loop.status, 400, 'the original cannot become an upsell of its own upsell')
+    assert.equal((await link(third.projectId, S.pFull)).status, 200); S.pThird = third.projectId
+
+    // delivery to combine: one deliverable on the parent's contract, one on the child's (the A26/Blitz contract, which already has two)
+    const ownDel = (await svc.from('deliverables').select('status, planned_quantity, delivered_quantity').eq('contract_id', S.contractId)).data!
+    const mk = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description: 'Parent deliverable', planned_quantity: 4, unit: 'posts' }, params: { id: S.ctrFull } }); assert.equal(mk.status, 201, JSON.stringify(mk.json))
+    const pd = await proj(S.pFull); assert.equal(pd.json.upsells.length, 2); assert.deepEqual(pd.json.upsells.map((u: any) => u.id).sort(), [S.pShort, S.pThird].sort())
+    assert.ok(pd.json.combined_delivery && pd.json.combined_delivery.counted >= 1 + ownDel.filter((x: any) => x.status !== 'replaced').length, 'the parent shows its own AND its upsells\' deliverables together')
+    assert.equal(pd.json.deliverables.summary.counted, 1, 'while its own summary counts only its own')
+    assert.equal((await proj(S.pShort)).json.project.parent.id, S.pFull)
+    assert.equal((await link(S.pShort, null)).status, 200); assert.equal((await svc.from('deals').select('parent_deal_id').eq('id', S.dealId).single()).data!.parent_deal_id, null, 'unlinking clears both'); assert.equal((await proj(S.pFull)).json.upsells.length, 1)
+  })
+
+  await step('L29: the communication log — requests record who is waiting on whom; only a request can be resolved, once; entries can never be edited or deleted', async () => {
+    const vendor = (await proj(S.pFull)).json.parties.find((x: any) => x.role === 'vendor'), brand = (await proj(S.pFull)).json.parties.find((x: any) => x.role === 'brand')
+    const log = (body: unknown, as = TEAM, id = S.pFull) => call(H.comms.POST, { as, method: 'POST', body, params: { id } })
+    const out = await log({ direction: 'outbound', channel: 'whatsapp', kind: 'request', summary: 'Please send the creative assets', party_id: vendor.id }); assert.equal(out.status, 201, JSON.stringify(out.json))
+    assert.deepEqual([out.json.status, out.json.waiting_on, out.json.party_name, out.json.created_by_name], ['open', 'them', 'Apex Sports Media', 'team user'], 'we asked the vendor, so we are waiting on THEM')
+    const inb = await log({ direction: 'inbound', channel: 'email', kind: 'request', summary: 'Brand wants a revised timeline', party_id: brand.id }); assert.deepEqual([inb.json.status, inb.json.waiting_on], ['open', 'us'], 'the brand asked us, so we are waiting on US')
+    const upd = await log({ direction: 'inbound', channel: 'telegram', kind: 'update', summary: 'Vendor confirmed go-live', occurred_at: '2026-01-15T10:00:00Z' }); assert.deepEqual([upd.status, upd.json.status, upd.json.waiting_on, upd.json.occurred_at.slice(0, 10)], [201, 'done', null, '2026-01-15'], 'a pasted-in past message keeps its own date')
+    const g = await call(H.comms.GET, { as: TEAM, params: { id: S.pFull } }); assert.equal(g.json.entries.length, 3); assert.equal(g.json.entries[0].id, inb.json.id, 'newest first')
+    assert.deepEqual([g.json.requests.total, g.json.requests.onUs, g.json.requests.onThem], [2, 1, 1]); assert.deepEqual(g.json.requests.byParty[vendor.id], { onUs: 0, onThem: 1 })
+    assert.equal((await call(H.projects.GET, { as: TEAM })).json.find((p: any) => p.id === S.pFull).waiting_on_us, 1)
+    assert.equal((await call(H.comms.GET, { as: TEAM, params: { id: S.pFull }, query: '?status=open' })).json.entries.length, 2); assert.equal((await call(H.comms.GET, { as: TEAM, params: { id: S.pFull }, query: '?status=bogus' })).status, 400)
+
+    for (const bad of [{ direction: 'sideways' }, { channel: 'pigeon' }, { kind: 'rumour' }, { summary: '  ' }, { summary: 'x'.repeat(2001) }, { occurred_at: 'yesterday' }, { occurred_at: '2999-01-01' }, { party_id: NIL }, { party_id: 'nope' }, { related_type: 'deliverable' }, { related_type: 'report', related_id: NIL }, { related_type: 'deliverable', related_id: NIL }, { related_type: 'invoice', related_id: NIL }])
+      assert.equal((await log({ direction: 'outbound', channel: 'email', kind: 'update', summary: 'ok', ...bad })).status, 400, JSON.stringify(bad).slice(0, 60))
+    const other = (await proj(S.pThird)).json.parties[0]; assert.equal((await log({ direction: 'outbound', channel: 'email', kind: 'update', summary: 'x', party_id: other.id })).status, 400, 'a party from ANOTHER project')
+    const del = (await svc.from('deliverables').select('id').eq('contract_id', S.ctrFull).limit(1).single()).data!.id
+    assert.equal((await log({ direction: 'outbound', channel: 'email', kind: 'proof', summary: 'Proof sent', related_type: 'deliverable', related_id: del })).status, 201, 'tied to one of THIS project\'s deliverables')
+    assert.equal((await log({ direction: 'outbound', channel: 'email', kind: 'proof', summary: 'x', related_type: 'deliverable', related_id: (await svc.from('deliverables').select('id').eq('contract_id', S.contractId).limit(1).single()).data!.id }, TEAM, S.pFull)).status, 400, 'a deliverable of ANOTHER project')
+    assert.equal((await log({ direction: 'inbound', channel: 'call', kind: 'approval', summary: 'Brand approved step', related_type: 'checklist_item', related_id: item(await proj(S.pFull), 'Kick-off call held').id })).status, 201)
+    assert.equal((await log({ direction: 'inbound', channel: 'call', kind: 'update', summary: 'x' }, TEAM, S.pShort)).status, 201); assert.equal((await call(H.comms.GET, { as: TEAM, params: { id: S.pFull } })).json.entries.every((e: any) => e.summary !== 'x'), true)
+
+    const res = (id: string, body: unknown = {}, as = TEAM, p = S.pFull) => call(H.commResolve.POST, { as, method: 'POST', body, params: { id: p, cid: id } })
+    assert.equal((await res(out.json.id, { note: 'Assets received by email' })).status, 200); assert.equal((await res(out.json.id)).status, 409, 'resolving twice'); assert.equal((await res(upd.json.id)).status, 409, 'an update was never open'); assert.equal((await res(NIL)).status, 404); assert.equal((await res(inb.json.id, {}, TEAM, S.pShort)).status, 404, 'through another project')
+    assert.deepEqual((await call(H.comms.GET, { as: TEAM, params: { id: S.pFull } })).json.requests, { total: 1, onUs: 1, onThem: 0, oldestDays: 0, byParty: { [brand.id]: { onUs: 1, onThem: 0 } } })
+    const row = (await svc.from('project_communications').select('status, waiting_on, resolution_note, resolved_by').eq('id', out.json.id).single()).data!; assert.deepEqual(row, { status: 'done', waiting_on: null, resolution_note: 'Assets received by email', resolved_by: TEAM })
+    assert.ok((await svc.from('project_communications').update({ summary: 'rewritten' }).eq('id', upd.json.id)).error, 'the DATABASE refuses an edit — even from the service layer')
+    assert.ok((await svc.from('project_communications').delete().eq('id', upd.json.id)).error, 'and a delete'); assert.ok((await svc.from('project_communications').update({ status: 'open', waiting_on: 'us', resolved_at: null }).eq('id', out.json.id)).error, 'and re-opening a resolved request')
+  })
+
+  await step('L7/L8: deliverables take quantities; STATUS FOLLOWS the delivered quantity; Team records deliveries but cannot change terms or mark missed', async () => {
+    const mk = (body: unknown, as = MANAGER) => call(H.deliverables.POST, { as, method: 'POST', body, params: { id: S.ctrFull } })
+    assert.equal((await mk({ description: 'x', planned_quantity: 5 }, TEAM)).status, 403); assert.equal((await mk({ description: 'x', planned_quantity: 0 })).status, 400); assert.equal((await mk({ description: 'x', planned_quantity: 'lots' })).status, 400); assert.equal((await mk({ description: 'x', unit: 'u'.repeat(41) })).status, 400)
+    S.D1 = (await mk({ description: 'Instagram posts', planned_quantity: 10, unit: 'posts' })).json.id; S.D2 = (await mk({ description: 'Banner days', planned_quantity: 30, unit: 'days' })).json.id; S.D3 = (await mk({ description: 'Event slot', planned_quantity: 1 })).json.id; S.D4 = (await mk({ description: 'Stadium board', planned_quantity: 5, unit: 'boards' })).json.id
+    const rec = (id: string, qty: number, as = TEAM) => call(H.deliverableById.PATCH, { as, method: 'PATCH', body: { delivered_quantity: qty }, params: { id } })
+    const a = await rec(S.D1, 4); assert.deepEqual([a.status, a.json.status, a.json.pct], [200, 'partial', 40], JSON.stringify(a.json))
+    assert.deepEqual((await rec(S.D1, 10)).json.status, 'delivered'); assert.deepEqual([(await rec(S.D1, 0)).json.status, (await rec(S.D1, 0)).json.pct], ['planned', 0], 'back to zero reopens it'); const over = await rec(S.D1, 12); assert.deepEqual([over.json.status, over.json.pct], ['delivered', 100], 'over-delivery is capped at 100%')
+    for (const bad of [-1, 'abc', 1e10]) assert.equal((await rec(S.D1, bad as number)).status, 400, String(bad))
+    const patch = (id: string, body: unknown, as: string) => call(H.deliverableById.PATCH, { as, method: 'PATCH', body, params: { id } })
+    assert.equal((await patch(S.D2, { planned_quantity: 99 }, TEAM)).status, 403, 'the terms are Manager/CEO'); assert.equal((await patch(S.D2, { status: 'missed' }, TEAM)).status, 403, 'marking missed has commercial consequences: Manager/CEO')
+    assert.equal((await patch(S.D2, { description: 'Banner days (extended)', planned_quantity: 31 }, MANAGER)).status, 200)
+    for (const bad of [{ status: 'delivered' }, { status: 'done' }, { status: 'planned' }, { nonsense: 1 }, {}, { planned_quantity: 0 }, { description: '' }, { due_date: '2030-13-01' }]) assert.equal((await patch(S.D2, bad, MANAGER)).status, 400, JSON.stringify(bad))
+    assert.equal((await patch(NIL, { delivered_quantity: 1 }, TEAM)).status, 404); assert.equal((await patch('nope', { delivered_quantity: 1 }, TEAM)).status, 404)
+    const shrunk = await patch(S.D1, { planned_quantity: 20 }, MANAGER); assert.deepEqual([shrunk.json.status, shrunk.json.pct], ['partial', 60], 'raising the target turns "delivered 12 of 10" into partial 12 of 20 — the status is recomputed, never left stale')
+    await patch(S.D1, { planned_quantity: 10 }, MANAGER)
+    const asContract = (await call(H.contractById.GET, { as: TEAM, params: { id: S.ctrFull } })).json.deliverables.find((d: any) => d.id === S.D2); assert.deepEqual([asContract.planned_quantity, asContract.unit, asContract.pct], [31, 'days', 0])
+  })
+
+  await step('L10: missed → make-good OR invoice adjustment (never both); the original leaves the delivery % so nothing is double-counted; replaced is closed', async () => {
+    const miss = (id: string, as = MANAGER) => call(H.deliverableById.PATCH, { as, method: 'PATCH', body: { status: 'missed' }, params: { id } })
+    assert.equal((await miss(S.D1)).status, 400, 'a fully delivered one cannot be missed'); assert.equal((await miss(S.D3)).json.status, 'missed')
+    const mg = (id: string, body: unknown = {}, as = MANAGER) => call(H.makeGood.POST, { as, method: 'POST', body, params: { id } })
+    assert.equal((await mg(S.D3, {}, TEAM)).status, 403); assert.equal((await mg(S.D1)).status, 400, 'only a missed one'); assert.equal((await mg(NIL)).status, 404); assert.equal((await mg(S.D3, { planned_quantity: 0 })).status, 400); assert.equal((await mg(S.D3, { due_date: '2030-02-30' })).status, 400)
+    const before = (await proj(S.pFull)).json.deliverables.summary
+    const made = await mg(S.D3, { due_date: '2031-03-01' }); assert.equal(made.status, 201, JSON.stringify(made.json)); S.MG = made.json.make_good.id
+    assert.deepEqual([made.json.make_good.planned_quantity, made.json.make_good.description, made.json.original_status], [1, 'Make-good: Event slot', 'replaced'], 'defaults to what was still owed')
+    assert.equal((await mg(S.D3)).status, 409, 'it already has one'); assert.equal((await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 1 }, params: { id: S.D3 } })).status, 400, 'a replaced deliverable is closed')
+    assert.equal((await mg(S.MG)).status, 400, 'a make-good cannot itself be made good (it is planned, not missed)')
+    const after = (await proj(S.pFull)).json.deliverables.summary; assert.equal(after.replacedExcluded, before.replacedExcluded + 1); assert.equal(after.counted, before.counted, 'the replaced one left the count and its make-good joined it: no double-count')
+
+    const adj = (id: string, body: unknown, as = MANAGER) => call(H.invAdj.POST, { as, method: 'POST', body, params: { id } })
+    assert.equal((await adj(S.D4, { flag: true, note: 'x' })).status, 400, 'only a MISSED one can be flagged'); await miss(S.D4)
+    assert.equal((await adj(S.D4, { flag: true }, TEAM)).status, 403); assert.equal((await adj(S.D4, { flag: true })).status, 400, 'say what the adjustment should be'); assert.equal((await adj(S.D4, { flag: 'yes' })).status, 400)
+    assert.equal((await adj(S.D4, { flag: true, note: 'Credit 5 boards at the contract rate' })).status, 200); assert.equal((await svc.from('deliverables').select('invoice_adjustment').eq('id', S.D4).single()).data!.invoice_adjustment, true)
+    assert.equal((await mg(S.D4)).status, 400, 'flagged for an adjustment, so no make-good until the flag is cleared')
+    const late = await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 2 }, params: { id: S.D4 } }); assert.deepEqual([late.json.status, late.json.invoice_adjustment, late.json.adjustment_note], ['partial', false, null], 'a late delivery moves it on and clears the flag with it')
+    await miss(S.D4); assert.equal((await adj(S.D4, { flag: true, note: 'Credit 3 boards' })).status, 200); assert.equal((await adj(S.D4, { flag: false })).json.invoice_adjustment, false)
+    const noMoney = JSON.stringify((await adj(S.D4, { flag: true, note: 'again' })).json); assert.ok(!/invoice_id|amount/.test(noMoney), 'flagging only records intent — it touches no invoice')
+    assert.equal(await count('invoices', { contract_id: S.ctrFull }) >= 2, true)
+  })
+
+  await step('L9: delivery % — per deliverable and per project, weighted by count (D13 default), missed = 0, replaced excluded', async () => {
+    const sum = async () => (await proj(S.pFull)).json.deliverables
+    await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 10 }, params: { id: S.D1 } })
+    const d2 = await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { planned_quantity: 30 }, params: { id: S.D2 } }); assert.equal(d2.status, 200)
+    await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 30 }, params: { id: S.D2 } })
+    const byId = (d: any, id: string) => d.items.find((x: any) => x.id === id)
+    let d = await sum(); assert.deepEqual([byId(d, S.D1).pct, byId(d, S.D2).pct, byId(d, S.MG).pct, byId(d, S.D4).pct], [100, 100, 0, 40], 'D4 is MISSED but 2 of its 5 boards really were delivered, and that counts')
+    // counted: Parent deliverable (0), D1 (100), D2 (100), MG (0), D4 (40)   [D3 is replaced and excluded]  → 240 / 5
+    assert.deepEqual([d.summary.counted, d.summary.replacedExcluded, d.summary.pct], [5, 1, 48], '(0 + 100 + 100 + 0 + 40) ÷ 5')
+    await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 1 }, params: { id: S.MG } })
+    d = await sum(); assert.equal(d.summary.pct, 68, 'the make-good is delivered: (0 + 100 + 100 + 100 + 40) ÷ 5'); assert.deepEqual([d.summary.delivered, d.summary.missed, d.summary.planned, d.summary.partial], [3, 1, 1, 0])
+    const listed = (await call(H.projects.GET, { as: TEAM })).json.find((p: any) => p.id === S.pFull); assert.equal(listed.delivery.pct, 68); assert.ok(listed.checklist_pct > 0 && ['open', 'cleared'].includes(listed.gate))
+    assert.equal((await proj(S.pShort)).json.deliverables.summary.pct !== undefined, true)
+    const emptyP = (await proj(S.pThird)).json; assert.equal(emptyP.deliverables.summary.pct, null, 'a project with nothing to deliver shows no % rather than a misleading 0 or 100'); assert.equal(emptyP.contract_id, null)
+  })
+
+  await step('overdue deliverables notify only while planned or partial — a delivered, missed or replaced one never does', async () => {
+    const mk = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description: 'Late banner', due_date: '2020-02-02', planned_quantity: 2 }, params: { id: S.ctrFull } })
+    const overdue = async () => ((await call(H.notifications.GET, { as: MANAGER })).json.find((g: any) => g.title === 'Overdue deliverables')?.items ?? []).map((i: any) => i.label)
+    assert.ok((await overdue()).includes('Late banner'))
+    await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 1 }, params: { id: mk.json.id } }); assert.ok((await overdue()).includes('Late banner'), 'a PARTIAL one is still overdue')
+    await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 2 }, params: { id: mk.json.id } }); assert.ok(!(await overdue()).includes('Late banner'), 'delivered: no longer overdue')
+    await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { delivered_quantity: 0 }, params: { id: mk.json.id } }); await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { status: 'missed' }, params: { id: mk.json.id } }); assert.ok(!(await overdue()).includes('Late banner'), 'missed is handled by make-good/adjustment, not by an overdue nag')
+  })
+
+  await step('L3/L4: templates are DATA — Manager edits them, Team reads them; an edit changes NEW projects only, never a live one', async () => {
+    const t = await call(H.templates.GET, { as: TEAM }); assert.equal(t.status, 200); assert.deepEqual(t.json.map((x: any) => x.key).sort(), ['full', 'short']); assert.match(t.json[0].description, /DRAFT/, 'the shipped checklist says it is a draft')
+    const shortBefore = (await flat('short')), liveBefore = items(await proj(S.pShort)).length
+    const add = (body: unknown, as = MANAGER) => call(H.templateItems.POST, { as, method: 'POST', body, params: { key: 'short' } })
+    assert.equal((await add({ phase_no: 1, side: 'team', title: 'Insurance certificate received' }, TEAM)).status, 403)
+    assert.equal((await add({ phase_no: 1, side: 'vendor', title: 'x' })).status, 400); assert.equal((await add({ phase_no: 1, side: 'team', title: 'x', auto_rule: 'made_up' })).status, 400); assert.equal((await add({ phase_no: 7, side: 'team', title: 'x' })).status, 400, 'a NEW phase needs a name'); assert.equal((await add({ phase_no: 1, side: 'team', title: '  ' })).status, 400)
+    const ok = await add({ phase_no: 1, side: 'team', title: 'Insurance certificate received' }); assert.equal(ok.status, 201, JSON.stringify(ok.json)); assert.equal(ok.json.phase_name, 'Confirm and brief', 'joins the existing phase')
+    assert.equal((await add({ phase_no: 7, phase_name: 'Wrap-up', side: 'brand', title: 'Thank-you note sent' })).status, 201)
+    const retire = (await svc.from('checklist_template_items').select('id').eq('template_key', 'short').eq('title', 'Brief sent to the vendor').single()).data!.id
+    const pt = (id: string, body: unknown, as = MANAGER) => call(H.templateItemById.PATCH, { as, method: 'PATCH', body, params: { id } })
+    assert.equal((await pt(retire, { active: false }, TEAM)).status, 403); assert.equal((await pt(retire, { active: false })).status, 200)
+    assert.equal((await pt(ok.json.id, { auto_rule: 'first_invoice_paid', title: 'Insurance certificate received (auto)' })).json.auto_rule, 'first_invoice_paid'); assert.equal((await pt(ok.json.id, { phase_no: 99 })).status, 400); assert.equal((await pt(ok.json.id, { auto_rule: 'nope' })).status, 400); assert.equal((await pt(ok.json.id, {})).status, 400); assert.equal((await pt(NIL, { active: false })).status, 404)
+
+    assert.equal(items(await proj(S.pShort)).length, liveBefore, 'the LIVE project did not change'); assert.ok(item(await proj(S.pShort), 'Brief sent to the vendor'), 'and still has the step that was retired')
+    const fresh = await winDeal('ooh_led', 'after the edit'); const fd = await proj(fresh.projectId); const titles = items(fd).map((i: any) => i.title)
+    assert.ok(titles.includes('Insurance certificate received (auto)') && titles.includes('Thank-you note sent'), 'a NEW project gets the edited template'); assert.ok(!titles.includes('Brief sent to the vendor'), 'minus the retired step')
+    assert.equal(items(fd).length, shortBefore + 2 - 1); assert.deepEqual(fd.json.checklist.phases.map((p: any) => p.phase_no), [1, 2, 3, 7])
+    assert.equal(item(fd, 'Insurance certificate received (auto)').auto, true)
   })
   await step('/api/health reports every migration present and no critical env missing', async () => {
     const r = await call(H.health.GET, { as: MANAGER }); assert.equal(r.status, 200, JSON.stringify(r.json))

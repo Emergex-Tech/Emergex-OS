@@ -8,7 +8,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "load-categories": "tsx scripts/load-categories.ts",
-    "test:logic": "tsx tests/block3.test.ts && tsx tests/finance.test.ts && tsx tests/agent.test.ts && tsx tests/files.test.ts && tsx tests/benchmarks.test.ts",
+    "test:logic": "tsx tests/block3.test.ts && tsx tests/finance.test.ts && tsx tests/agent.test.ts && tsx tests/files.test.ts && tsx tests/benchmarks.test.ts && tsx tests/projects.test.ts",
     "test:e2e": "tsx --tsconfig tests/e2e/tsconfig.json tests/e2e/run.ts"
   },
   "dependencies": {
