@@ -63,7 +63,7 @@ const failures: string[] = []
 let passed = 0
 async function step(name: string, fn: () => Promise<void>) {
   try { await fn(); passed++; console.log('  ok   ' + name) }
-  catch (e: any) { failures.push(`${name}\n         ${String(e.message).split('\n').slice(0, 4).join('\n         ')}`); console.log('  FAIL ' + name) }
+  catch (e: any) { failures.push(`${name}\n         ${String(e.message).split('\n').slice(0, 16).join('\n         ')}`); console.log('  FAIL ' + name) }
 }
 const near = (a: number, b: number) => Math.abs(a - b) < 0.01
 
@@ -110,6 +110,8 @@ async function main() {
     partyById: await load('projects/[id]/parties/[partyId]'), comms: await load('projects/[id]/communications'), commResolve: await load('projects/[id]/communications/[cid]/resolve'),
     templates: await load('checklist-templates'), templateItems: await load('checklist-templates/[key]/items'), templateItemById: await load('checklist-template-items/[id]'),
     makeGood: await load('deliverables/[id]/make-good'), invAdj: await load('deliverables/[id]/invoice-adjustment'),
+    metricDefs: await load('metric-definitions'), metricDefById: await load('metric-definitions/[category]/[key]'), metrics: await load('projects/[id]/metrics'), metricVoid: await load('projects/[id]/metrics/[mid]/void'),
+    proofs: await load('deliverables/[id]/proofs'), proofById: await load('deliverables/[id]/proofs/[proofId]'),
     files: await load('contracts/[id]/files'), fileById: await load('contracts/[id]/files/[fileId]'), changePw2: await load('account/change-password')
   }
 
@@ -1331,6 +1333,115 @@ async function main() {
     assert.ok(titles.includes('Insurance certificate received (auto)') && titles.includes('Thank-you note sent'), 'a NEW project gets the edited template'); assert.ok(!titles.includes('Brief sent to the vendor'), 'minus the retired step')
     assert.equal(items(fd).length, shortBefore + 2 - 1); assert.deepEqual(fd.json.checklist.phases.map((p: any) => p.phase_no), [1, 2, 3, 7])
     assert.equal(item(fd, 'Insurance certificate received (auto)').auto, true)
+  })
+  console.log('\nStage 3 — proof, metrics, delivery at risk, project notifications (L11, L13, L14, L26, L27)')
+  const metricsOf = (pid: string, as = TEAM, q = '') => call(H.metrics.GET, { as, params: { id: pid }, query: q })
+  const rec = (pid: string, body: unknown, as = TEAM) => call(H.metrics.POST, { as, method: 'POST', body, params: { id: pid } })
+  const sumOf = (d: any, key: string) => d.json.summary.find((x: any) => x.metric_key === key)
+
+  await step('L13: metric sets exist for every category (a DRAFT); Team reads them, only Manager edits; edits never touch recorded entries', async () => {
+    const t = await call(H.metricDefs.GET, { as: TEAM }); assert.equal(t.status, 200)
+    assert.equal(new Set(t.json.map((d: any) => d.category_key)).size, 12, 'a metric set for each of the 12 categories')
+    const er = t.json.find((d: any) => d.category_key === 'influencer_creator' && d.key === 'engagement_rate'); assert.deepEqual([er.aggregation, er.unit], ['avg', '%'])
+    const add = (body: unknown, as = MANAGER) => call(H.metricDefs.POST, { as, method: 'POST', body })
+    assert.equal((await add({ category_key: 'team', key: 'sponsor_mentions', label: 'Sponsor mentions' }, TEAM)).status, 403)
+    for (const bad of [{ category_key: 'nonsense', key: 'x', label: 'x' }, { category_key: 'team', key: 'Bad Key', label: 'x' }, { category_key: 'team', key: 'ok_key', label: '  ' }, { category_key: 'team', key: 'ok_key', label: 'x', aggregation: 'median' }, { category_key: 'team', key: 'ok_key', label: 'x', unit: 'u'.repeat(21) }, { category_key: 'team', key: 'matches', label: 'dup' }])
+      assert.ok([400, 409].includes((await add(bad)).status), JSON.stringify(bad)); assert.equal((await add({ category_key: 'team', key: 'matches', label: 'dup' })).status, 409)
+    const ok = await add({ category_key: 'team', key: 'fan_rate', label: 'Fan engagement', unit: '%', aggregation: 'avg' }); assert.equal(ok.status, 201, JSON.stringify(ok.json)); assert.equal(ok.json.position, 50, 'goes to the end of that set')
+    const pt = (cat: string, key: string, body: unknown, as = MANAGER) => call(H.metricDefById.PATCH, { as, method: 'PATCH', body, params: { category: cat, key } })
+    assert.equal((await pt('team', 'fan_rate', { label: 'x' }, TEAM)).status, 403); assert.equal((await pt('team', 'fan_rate', { label: 'Fan engagement rate' })).json.label, 'Fan engagement rate')
+    for (const bad of [{ aggregation: 'median' }, {}, { label: '' }, { position: 1.5 }]) assert.equal((await pt('team', 'fan_rate', bad)).status, 400, JSON.stringify(bad)); assert.equal((await pt('team', 'nope', { active: false })).status, 404)
+  })
+
+  await step('L14: metric entries — only a metric from THIS project\'s categories; a NEWER reading replaces an older one (no double-counting); counts add, rates average', async () => {
+    const d0 = await metricsOf(S.pFull); assert.equal(d0.status, 200, JSON.stringify(d0.json)); assert.deepEqual(d0.json.categories, ['team'])
+    assert.ok(d0.json.definitions.every((d: any) => d.category_key === 'team'), 'only the sets for this project\'s category')
+    const base = { source: 'Broadcaster report' }
+    for (const bad of [{ metric_key: 'views', value: 1 }, { metric_key: 'nope', value: 1 }, { metric_key: 'matches', category_key: 'ooh_led', value: 1 }, { metric_key: 'matches', value: -1 }, { metric_key: 'matches', value: 'abc' }, { metric_key: 'matches', value: 1, source: '  ' }, { metric_key: 'matches', value: 1, recorded_on: '2999-01-01' }, { metric_key: 'matches', value: 1, recorded_on: '2026-02-30' }, { metric_key: 'matches', value: 1, deliverable_id: NIL }, { metric_key: 'matches', value: 1, deliverable_id: (await svc.from('deliverables').select('id').eq('contract_id', S.contractId).limit(1).single()).data!.id }, { metric_key: 'fan_rate', value: 101 }])
+      assert.equal((await rec(S.pFull, { ...base, ...bad })).status, 400, JSON.stringify(bad).slice(0, 70))
+    const first = await rec(S.pFull, { ...base, metric_key: 'matches', value: 3, deliverable_id: S.D1 }); assert.equal(first.status, 201, JSON.stringify(first.json)); assert.deepEqual([first.json.metric_key, first.json.value, first.json.recorded_by_name], ['matches', 3, 'team user'])
+
+    const e = async (key: string, value: number, on: number, deliverable: string | null) => (await rec(S.pFull, { ...base, metric_key: key, value, recorded_on: isoDay(on), deliverable_id: deliverable ?? undefined, source_ref: 'https://example.test/r' })).json.id
+    await e('exposure', 1000, -5, S.D1); await e('exposure', 500, -3, S.D2); await e('exposure', 100, -1, null); S.mNew = await e('exposure', 1500, -1, S.D1)
+    let x = sumOf(await metricsOf(S.pFull), 'exposure'); assert.deepEqual([x.value, x.subjects, x.as_of], [2100, 3, isoDay(-1)], 'D1\'s newer 1,500 REPLACES its 1,000: 1,500 + 500 + 100, not 3,100')
+    await e('fan_rate', 40, -2, S.D1); await e('fan_rate', 60, -2, S.D2); x = sumOf(await metricsOf(S.pFull), 'fan_rate'); assert.deepEqual([x.value, x.aggregation, x.unit], [50, 'avg', '%'], 'rates are averaged, not added')
+
+    const v = (mid: string, body: unknown, as = TEAM, pid = S.pFull) => call(H.metricVoid.POST, { as, method: 'POST', body, params: { id: pid, mid } })
+    assert.equal((await v(S.mNew, {})).status, 400, 'a reason is required'); assert.equal((await v(S.mNew, { reason: 'r'.repeat(501) })).status, 400); assert.equal((await v(NIL, { reason: 'x' })).status, 404); assert.equal((await v(S.mNew, { reason: 'x' }, TEAM, S.pShort)).status, 404, 'through another project')
+    assert.equal((await v(S.mNew, { reason: 'Entered against the wrong deliverable' })).status, 200); assert.equal((await v(S.mNew, { reason: 'again' })).status, 409, 'voided once')
+    x = sumOf(await metricsOf(S.pFull), 'exposure'); assert.equal(x.value, 1600, 'voiding the 1,500 brings D1 back to its earlier 1,000: 1,000 + 500 + 100')
+    assert.ok(!(await metricsOf(S.pFull)).json.entries.some((en: any) => en.id === S.mNew), 'hidden by default'); const all = (await metricsOf(S.pFull, TEAM, '?include_voided=1')).json.entries.find((en: any) => en.id === S.mNew); assert.deepEqual([all.void_reason, !!all.voided_at], ['Entered against the wrong deliverable', true])
+    assert.ok((await svc.from('project_metrics').update({ value: 1 }).eq('id', S.mNew)).error, 'the DATABASE refuses an edit'); assert.ok((await svc.from('project_metrics').delete().eq('id', S.mNew)).error, 'and a delete')
+
+    await rec(S.pFull, { ...base, metric_key: 'team_posts', value: 7 }); assert.equal((await call(H.metricDefById.PATCH, { as: MANAGER, method: 'PATCH', body: { active: false }, params: { category: 'team', key: 'team_posts' } })).status, 200)
+    assert.equal((await rec(S.pFull, { ...base, metric_key: 'team_posts', value: 8 })).status, 400, 'a retired metric takes no NEW entries'); assert.equal(sumOf(await metricsOf(S.pFull), 'team_posts').value, 7, 'but what was recorded is still counted')
+    assert.equal((await metricsOf(S.pShort)).json.categories.includes('team'), false); assert.equal((await metricsOf(NIL)).status, 404)
+  })
+
+  await step('L11: proof — upload to the project folder or link a Drive file; hostile links, bad files and a Drive outage are refused and store nothing; archive, never delete', async () => {
+    const PNG = (tag: string) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(tag.repeat(40))])
+    const list = async (id: string) => (await call(H.proofs.GET, { as: TEAM, params: { id } })).json
+    const upload = (id: string, f: FormData, as = TEAM) => call(H.proofs.POST, { as, method: 'POST', form: f, params: { id } })
+    const link = (id: string, body: unknown, as = TEAM) => call(H.proofs.POST, { as, method: 'POST', body, params: { id } })
+    const detail = async () => (await proj(S.pFull)).json
+    assert.equal((await detail()).proof_missing, 3, 'D1, D2 and the make-good were delivered and have no proof'); assert.equal((await detail()).deliverables.items.find((x: any) => x.id === S.D1).proof_count, 0)
+    useFakeDrive()
+    try {
+      const up = await upload(S.D1, form(PNG('a'), 'screenshot.png', { note: 'Insights, day 3' })); assert.equal(up.status, 201, JSON.stringify(up.json)); assert.deepEqual([up.json.kind, up.json.name, up.json.mime_type, up.json.note, up.json.added_by_name], ['upload', 'screenshot.png', 'image/png', 'Insights, day 3', 'team user'])
+      assert.ok(fake.names.some((n) => /proof v1 - screenshot\.png$/.test(n)), `named in Drive: ${fake.names.slice(-1)}`); S.proofA = up.json.id
+      const dup = await upload(S.D1, form(PNG('a'), 'renamed.png')); assert.deepEqual([dup.status, dup.json.duplicate], [200, true]); assert.equal((await list(S.D1)).length, 1, 'identical bytes are not attached twice')
+      const before = await count('deliverable_proofs', { deliverable_id: S.D1 })
+      for (const [name, buf, want] of [['run.exe', Buffer.concat([Buffer.from('MZ'), Buffer.alloc(60, 7)]), 400], ['fake.png', Buffer.concat([Buffer.from('MZ'), Buffer.alloc(60, 7)]), 400], ['page.html', Buffer.from('<script>x</script>'), 400], ['empty.png', Buffer.alloc(0), 400], ['big.png', Buffer.concat([PNG('b'), Buffer.alloc(4 * 1024 * 1024)]), 413]] as const) assert.equal((await upload(S.D1, form(buf, name))).status, want, name)
+      const none = new FormData(); none.append('note', 'x'); assert.equal((await upload(S.D1, none)).status, 400)
+      fake.fail = true; const down = await upload(S.D1, form(PNG('c'), 'while-down.png')); fake.fail = false; assert.equal(down.status, 502); assert.match(down.json.error, /NOT saved/)
+      assert.equal(await count('deliverable_proofs', { deliverable_id: S.D1 }), before, 'nothing was recorded for a file that was never stored'); assert.ok(await count('audit_events', { action: 'deliverable_proof_upload_failed' }) >= 1)
+
+      const good = 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view?usp=sharing'; const l = await link(S.D2, { url: good, name: 'Tracker proof' }); assert.equal(l.status, 201, JSON.stringify(l.json)); assert.deepEqual([l.json.kind, l.json.name], ['link', 'Tracker proof']); S.proofL = l.json.id
+      assert.equal((await link(S.D2, { url: good })).status, 409, 'the same link twice')
+      for (const bad of ['http://drive.google.com/file/d/1AbCdEfGhIjKlMnOp', 'javascript:alert(1)', 'https://evil.example/drive.google.com/x', 'https://drive.google.com.evil.example/file/d/1AbCdEfGhIjKlMnOp', 'https://user:pw@drive.google.com/x', '', 'not a link']) assert.equal((await link(S.D2, { url: bad })).status, 400, bad)
+      assert.equal((await link(S.D3, { url: good })).status, 400, 'a replaced deliverable is closed — proof goes on its make-good'); assert.equal((await link(NIL, { url: good })).status, 404); assert.equal((await link('nope', { url: good })).status, 404)
+      assert.equal((await link(S.MG, { url: 'https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOp/edit' })).status, 201)
+
+      const dl = await call(H.proofById.GET, { as: TEAM, params: { id: S.D1, proofId: S.proofA } }); assert.equal(dl.status, 200); assert.ok(Buffer.from(await dl.res.arrayBuffer()).equals(PNG('a')), 'byte-for-byte')
+      assert.match(dl.res.headers.get('content-disposition') ?? '', /^attachment; filename="screenshot\.png"$/); assert.equal(dl.res.headers.get('x-content-type-options'), 'nosniff')
+      const dl2 = await call(H.proofById.GET, { as: TEAM, params: { id: S.D2, proofId: S.proofL } }); assert.equal(dl2.status, 400); assert.match(dl2.json.error, /link/)
+      assert.equal((await call(H.proofById.GET, { as: TEAM, params: { id: S.D2, proofId: S.proofA } })).status, 404, 'a proof cannot be fetched through another deliverable')
+      const d = await detail(); assert.equal(d.deliverables.items.find((x: any) => x.id === S.D1).proof_count, 1); assert.equal(d.proof_missing, 0, 'every delivered deliverable now has proof')
+      assert.equal((await call(H.proofById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.D1, proofId: S.proofA } })).status, 200); assert.equal((await call(H.proofById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.D1, proofId: S.proofA } })).status, 404)
+      assert.equal((await list(S.D1)).length, 0); assert.equal(await count('deliverable_proofs', { id: S.proofA }), 1, 'archived, not deleted'); assert.equal((await call(H.proofById.GET, { as: TEAM, params: { id: S.D1, proofId: S.proofA } })).status, 404)
+      assert.equal((await upload(S.D1, form(PNG('a'), 'again.png'))).status, 201, 'the same file can be re-attached once the old one is archived'); assert.equal((await detail()).proof_missing, 0)
+    } finally { restoreDrive() }
+  })
+
+  await step('L26: the CEO view lists live projects and DELIVERY AT RISK with the reason for each; it stays CEO-only', async () => {
+    const stale = await call(H.comms.POST, { as: TEAM, method: 'POST', body: { direction: 'inbound', channel: 'email', kind: 'request', summary: 'Brand wants the report format changed', occurred_at: new Date(Date.now() - 10 * 86_400_000).toISOString() }, params: { id: S.pThird } }); assert.equal(stale.status, 201)
+    const r = await call(H.ceoView.GET, { as: CEO }); assert.equal(r.status, 200, JSON.stringify(r.json)); const pj = r.json.projects
+    assert.equal(pj.active, await count('projects', { status: 'active' })); assert.ok(pj.waiting_on_us >= 2); assert.equal(typeof pj.gates_open, 'number'); assert.ok(pj.avg_delivery_pct == null || (pj.avg_delivery_pct >= 0 && pj.avg_delivery_pct <= 100))
+    const risk = (id: string) => pj.delivery_at_risk.find((x: any) => x.id === id); const codes = (id: string) => risk(id)?.reasons.map((x: any) => x.code)
+    assert.ok(codes(S.pFull)?.includes('missed_unresolved'), 'the missed "Late banner" has no make-good and no invoice adjustment'); assert.equal(risk(S.pFull).reasons.find((x: any) => x.code === 'missed_unresolved').count, 1, 'exactly ONE: Late banner. The missed Stadium board WAS flagged for an invoice adjustment, so it is not unresolved')
+    assert.ok(codes(S.pShort)?.includes('overdue_deliverables'), 'the A26/Blitz project has a planned deliverable due in 2020'); assert.match(risk(S.pShort).reasons.find((x: any) => x.code === 'overdue_deliverables').detail, /past due/)
+    const sr = risk(S.pThird).reasons.find((x: any) => x.code === 'stale_request'); assert.ok(sr, 'a request waiting on US for 10 days'); assert.match(sr.detail, /10 days/)
+    assert.equal(risk(S.pFull).reasons.some((x: any) => x.code === 'stale_request'), false, 'the brand\'s request on this project is brand new, so not stale')
+    assert.equal((await call(H.ceoView.GET, { as: MANAGER })).status, 403); assert.equal((await call(H.ceoView.GET, { as: TEAM })).status, 403)
+  })
+
+  await step('L27: project notifications for EVERY staff role — waiting on us, due this week, delivered without proof, overdue steps — and they clear when the cause is fixed', async () => {
+    const grp = async (title: string, as = TEAM) => (await call(H.notifications.GET, { as })).json.find((g: any) => g.title === title)
+    const w = await grp('Waiting on us'); assert.ok(w, 'a group for requests waiting on us'); const stale = w.items.find((i: any) => /report format/.test(i.detail)); assert.ok(stale && stale.severity === 'urgent' && /10 days/.test(stale.detail), JSON.stringify(w.items.map((i: any) => i.detail))); assert.equal(stale.link, `/projects/${S.pThird}`)
+    assert.ok(w.items.some((i: any) => /revised timeline/.test(i.detail) && i.severity === 'warn'), 'a fresh request is a warning, not urgent')
+    const mk = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description: 'Banner removal', due_date: isoDay(3), planned_quantity: 1 }, params: { id: S.ctrFull } }); assert.equal(mk.status, 201)
+    const due = await grp('Deliverables due this week'); assert.ok(due.items.some((i: any) => i.label === 'Banner removal' && i.detail.includes(`due ${isoDay(3)}`))); assert.ok(!due.items.some((i: any) => i.label === 'Late banner'), 'an old past-due one belongs to "overdue", not "this week"')
+    await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 1 }, params: { id: mk.json.id } }); assert.ok(!(await grp('Deliverables due this week'))?.items.some((i: any) => i.label === 'Banner removal'), 'delivered: no longer "due"')
+    const p = await grp('Delivered without proof'); assert.ok(p?.items.some((i: any) => i.label === 'Banner removal'), 'delivered with nothing on file'); useFakeDrive()
+    try { assert.equal((await call(H.proofs.POST, { as: TEAM, method: 'POST', body: { url: 'https://drive.google.com/file/d/1ZyXwVuTsRqPoNm/view' }, params: { id: mk.json.id } })).status, 201) } finally { restoreDrive() }
+    assert.ok(!(await grp('Delivered without proof'))?.items.some((i: any) => i.label === 'Banner removal'), 'attaching proof clears it')
+    const step = item(await proj(S.pFull), 'Mid-campaign check-in with the brand')
+    await call(H.checklistItem.PATCH, { as: TEAM, method: 'PATCH', body: { due_date: '2020-01-01' }, params: { id: S.pFull, itemId: step.id } }); const o = await grp('Overdue project steps'); assert.ok(o.items.some((i: any) => i.label === 'Mid-campaign check-in with the brand' && i.detail.includes('2020-01-01')))
+    await call(H.checklistItem.PATCH, { as: TEAM, method: 'PATCH', body: { status: 'done' }, params: { id: S.pFull, itemId: step.id } }); assert.ok(!(await grp('Overdue project steps'))?.items.some((i: any) => i.label === 'Mid-campaign check-in with the brand'), 'ticking it clears it')
+    for (const as of [TEAM, MANAGER, CEO]) assert.ok(await grp('Waiting on us', as), 'every staff role sees project alerts')
+    const body = JSON.stringify((await call(H.notifications.GET, { as: TEAM })).json); assert.ok(!/INV-|BILL-|"amount"/.test(body), 'and Team still sees no finance in the feed')
+    await call(H.comms.POST, { as: TEAM, method: 'POST', body: { direction: 'outbound', channel: 'email', kind: 'update', summary: 'ack' }, params: { id: S.pThird } })
+    assert.equal((await call(H.notifications.GET, { as: MANAGER })).status, 200)
   })
   await step('/api/health reports every migration present and no critical env missing', async () => {
     const r = await call(H.health.GET, { as: MANAGER }); assert.equal(r.status, 200, JSON.stringify(r.json))
