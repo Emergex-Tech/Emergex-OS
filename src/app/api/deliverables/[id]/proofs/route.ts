@@ -20,7 +20,7 @@ async function loadDeliverable(orgId: string, id: string) {
   const { data } = await supabaseService().from('deliverables').select('id, description, status, contracts(deal_id)').eq('id', id).eq('org_id', orgId).maybeSingle()
   if (!data) throw new ApiError(404, 'Deliverable not found')
   const dealId = (data.contracts as unknown as { deal_id: string } | null)?.deal_id
-  const { data: project } = dealId ? await supabaseService().from('projects').select('id, name').eq('deal_id', dealId).maybeSingle() : { data: null }
+  const { data: project } = dealId ? await supabaseService().from('projects').select('id, name, status').eq('deal_id', dealId).maybeSingle() : { data: null }
   return { ...data, project }
 }
 
@@ -44,6 +44,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     await requirePermission(profile, 'record.update')
     const d = await loadDeliverable(profile.org_id, params.id)
     if (d.status === 'replaced') throw new ApiError(400, 'This deliverable has been replaced by a make-good — attach proof to the make-good instead')
+    if (d.project?.status === 'closed') throw new ApiError(409, 'This project is closed, so its delivery record is locked. Reopen the project to change it.') // before Drive is touched: no orphan file
     const svc = supabaseService()
     const isUpload = (req.headers.get('content-type') ?? '').includes('multipart/form-data')
 
