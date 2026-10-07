@@ -20,7 +20,8 @@ const NAV = [
   { href: '/notifications', label: 'Notifications' },
   { href: '/search', label: 'Search' },
   { href: '/shortlists', label: 'Shortlists' },
-  { href: '/benchmarks', label: 'Benchmarks' }
+  { href: '/benchmarks', label: 'Benchmarks' },
+  { href: '/case-studies', label: 'Case studies' }
 ]
 const MANAGEMENT_ROLES = ['manager', 'ceo', 'management']
 // ceo_view.access is held only by CEO (and legacy 'management') — NOT Manager, per the additive role design in 002_stage2a_role_split.sql.

@@ -5,6 +5,9 @@ import { templateForCategories, effectiveStatus, phaseProgress, gateStatus, summ
 import { projectDelivery, deliveryPct, type DeliveryItem, type DeliveryStatus } from './delivery'
 import { writeAudit } from './serviceLayer'
 import { summariseMetrics, proofMissing, type MetricDef, type MetricEntry } from './metrics'
+import { type ClosureFacts } from './closure'
+import { createRecord, tryCreateDriveFolder } from './serviceLayer'
+import { proposalFolderName } from './naming'
 
 const emptyFacts = (): ProjectFacts => ({ contractExists: false, contractFileUploaded: false, receivables: { total: 0, issued: 0, paid: 0 } })
 
@@ -113,7 +116,7 @@ const checklistPct = (items: { status: ItemStatus }[]) => { const na = items.fil
 export async function loadProjectDetail(orgId: string, projectId: string) {
   const svc = supabaseService()
   const { data: p, error } = await svc.from('projects')
-    .select('id, name, status, template_key, deal_id, parent_project_id, owner_id, created_at, owner:profiles!projects_owner_id_fkey(full_name), deals(proposals(brands(name)))')
+    .select('id, name, status, template_key, deal_id, parent_project_id, owner_id, created_at, closed_at, closure_note, closure_warnings, owner:profiles!projects_owner_id_fkey(full_name), closer:profiles!projects_closed_by_fkey(full_name), deals(proposals(brands(name)))')
     .eq('id', projectId).eq('org_id', orgId).maybeSingle()
   if (error) throw new ApiError(500, error.message)
   if (!p) throw new ApiError(404, 'Project not found')
@@ -125,6 +128,10 @@ export async function loadProjectDetail(orgId: string, projectId: string) {
     svc.from('project_checklist_items').select('id, template_item_id, phase_no, phase_name, side, title, auto_rule, status, due_date, notes, na_reason, position, owner_id, completed_at, owner:profiles!project_checklist_items_owner_id_fkey(full_name)').eq('project_id', projectId).is('archived_at', null).order('phase_no').order('position'),
     svc.from('project_parties').select('id, role, side, name, ref_type, ref_id, contact, notes').eq('project_id', projectId).is('archived_at', null).order('created_at'),
     svc.from('project_communications').select('id, status, waiting_on, party_id, occurred_at, kind').eq('project_id', projectId).eq('status', 'open')
+  ])
+  const [renewal, study] = await Promise.all([
+    svc.from('proposals').select('id, stage').eq('renewal_of_project_id', projectId).maybeSingle(),
+    svc.from('case_studies').select('id, status, named_use_approved').eq('project_id', projectId).maybeSingle()
   ])
   const childRows = children.data ?? []
   const dealIds = [p.deal_id, ...childRows.map((c) => c.deal_id)]
@@ -149,7 +156,8 @@ export async function loadProjectDetail(orgId: string, projectId: string) {
     project: {
       id: p.id, name: p.name, status: p.status, template_key: p.template_key, template_name: tmpl.data?.name ?? p.template_key, deal_id: p.deal_id,
       brand_name: ((p.deals as unknown as { proposals: { brands: { name: string } | null } | null } | null)?.proposals?.brands?.name) ?? '', owner_id: p.owner_id,
-      owner_name: (p.owner as unknown as { full_name: string } | null)?.full_name ?? null, parent: parent.data ?? null, created_at: p.created_at
+      owner_name: (p.owner as unknown as { full_name: string } | null)?.full_name ?? null, parent: parent.data ?? null, created_at: p.created_at,
+      closed_at: p.closed_at, closed_by_name: (p.closer as unknown as { full_name: string } | null)?.full_name ?? null, closure_note: p.closure_note, closure_warnings: p.closure_warnings
     },
     contract_id: dels.contractByDeal.get(p.deal_id) ?? null,
     checklist: { phases: progress.map((ph) => ({ ...ph, items: checklist.filter((c) => c.phase_no === ph.phase_no) })), gate: gateStatus(progress.find((x) => x.phase_no === 1)), overall_pct: checklistPct(checklist.map((c) => ({ status: c.effective_status }))) },
@@ -157,6 +165,7 @@ export async function loadProjectDetail(orgId: string, projectId: string) {
     deliverables: { items: own, summary: projectDelivery(toDelivery(own)) },
     upsells: childRows.map((c) => ({ id: c.id, name: c.name, status: c.status, delivery: projectDelivery(toDelivery(dels.byDeal.get(c.deal_id) ?? [])) })),
     combined_delivery: childRows.length ? projectDelivery(toDelivery(allDeliverables)) : null,
+    renewal_proposal: renewal.data ?? null, case_study: study.data ?? null,
     requests: summariseOpenRequests(comms.data ?? []),
     categories, metrics, proof_missing: own.filter((x) => proofMissing({ status: String(x.status), delivered_quantity: Number(x.delivered_quantity) }, Number(x.proof_count ?? 0))).length
   }
@@ -196,3 +205,59 @@ export async function loadMetricSummary(orgId: string, projectId: string, catego
   return summariseMetrics(((entries.data ?? []) as unknown as MetricEntry[]).map((e) => ({ ...e, value: Number(e.value) })), defs)
 }
 export { proofMissing }
+
+/** What is still open on a project at this moment — counts only (never amounts). */
+export async function loadClosureFacts(orgId: string, projectId: string, dealId: string): Promise<ClosureFacts> {
+  const svc = supabaseService()
+  const [facts, dels, items, comms] = await Promise.all([
+    loadFactsBulk(orgId, [dealId]), loadDeliverablesByDeal(orgId, [dealId]),
+    svc.from('project_checklist_items').select('status, auto_rule').eq('project_id', projectId).is('archived_at', null),
+    svc.from('project_communications').select('waiting_on').eq('project_id', projectId).eq('status', 'open')
+  ])
+  const f = facts.get(dealId)!
+  const rows = (dels.byDeal.get(dealId) ?? []) as { status: string; invoice_adjustment: boolean; delivered_quantity: number; proof_count: number }[]
+  const open = (comms.data ?? []) as { waiting_on: string }[]
+  return {
+    hasContract: f.contractExists, requestsOpen: open.length, requestsWaitingOnUs: open.filter((c) => c.waiting_on === 'us').length,
+    deliverablesOpen: rows.filter((d) => d.status === 'planned' || d.status === 'partial').length,
+    missedUnresolved: rows.filter((d) => d.status === 'missed' && !d.invoice_adjustment).length,
+    stepsOpen: ((items.data ?? []) as { status: ItemStatus; auto_rule: GateRule | null }[]).filter((i) => effectiveStatus(i, f) === 'open').length,
+    invoicesOutstanding: f.receivables.total - f.receivables.paid,
+    proofMissing: rows.filter((d) => proofMissing({ status: d.status, delivered_quantity: Number(d.delivered_quantity) }, Number(d.proof_count))).length
+  }
+}
+
+/** The renewal pitch: a Draft proposal for the same brand, route and contact, linked to the project. One per project, so it is safe to call twice. */
+export async function ensureRenewalProposal(profile: import('@/types/db').Profile, project: { id: string; name: string; deal_id: string }): Promise<{ id: string; created: boolean }> {
+  const svc = supabaseService()
+  const existing = async () => (await svc.from('proposals').select('id').eq('renewal_of_project_id', project.id).maybeSingle()).data
+  const have = await existing(); if (have) return { id: have.id, created: false }
+  const { data: deal } = await svc.from('deals').select('proposal_id').eq('id', project.deal_id).eq('org_id', profile.org_id).maybeSingle()
+  const { data: orig } = deal ? await svc.from('proposals').select('brand_id, route_id, contact_id, budget, currency, markets, brands(name)').eq('id', deal.proposal_id).maybeSingle() : { data: null }
+  if (!orig) throw new ApiError(400, 'This project has no original proposal to renew')
+  let proposal
+  try {
+    proposal = await createRecord({ profile, permission: 'record.create', table: 'proposals', entityType: 'proposal',
+      data: { brand_id: orig.brand_id, route_id: orig.route_id, contact_id: orig.contact_id, brief: `Renewal of "${project.name}"`, budget: orig.budget, currency: orig.currency ?? 'USD', markets: orig.markets, stage: 'Draft', renewal_of_project_id: project.id } })
+  } catch (e) { const raced = await existing(); if (raced) return { id: raced.id, created: false }; throw e }
+  await tryCreateDriveFolder({ orgId: profile.org_id, actorId: profile.id, entityType: 'proposal', entityId: proposal.id, folderName: proposalFolderName((orig.brands as unknown as { name: string } | null)?.name ?? 'Brand', proposal.created_at, proposal.id) })
+  return { id: proposal.id, created: true }
+}
+
+/** Everything a case study is built from and anonymised against. */
+export async function loadCaseStudyContext(orgId: string, project: { id: string; name: string; deal_id: string }) {
+  const svc = supabaseService()
+  const { data: deal } = await svc.from('deals').select('proposal_id').eq('id', project.deal_id).eq('org_id', orgId).maybeSingle()
+  const { data: prop } = deal ? await svc.from('proposals').select('brand_id, brands(name, brand_groups(name))').eq('id', deal.proposal_id).maybeSingle() : { data: null }
+  const brand = prop?.brands as unknown as { name: string; brand_groups: { name: string } | null } | null
+  const { data: lines } = deal ? await svc.from('proposal_lines').select('items(properties(name, market, category_key, categories(label)))').eq('proposal_id', deal.proposal_id) : { data: [] }
+  type P = { name: string; market: string | null; category_key: string; categories: { label: string } | null }
+  const props = (lines ?? []).map((l) => (l.items as unknown as { properties: P | null } | null)?.properties).filter((p): p is P => !!p)
+  const uniq = (xs: (string | null | undefined)[]) => Array.from(new Set(xs.filter((x): x is string => !!x && !!x.trim())))
+  const { data: parties } = await svc.from('project_parties').select('name, role').eq('project_id', project.id).is('archived_at', null)
+  const partners = (parties ?? []).filter((p) => ['vendor', 'delivery_agent', 'brand_route', 'talent', 'emergex_owner'].includes(p.role) && p.name !== 'Direct (no agent)').map((p) => p.name as string)
+  return {
+    brandId: (prop?.brand_id as string | undefined) ?? null, brandNames: uniq([brand?.name, brand?.brand_groups?.name]), brandName: brand?.name ?? 'The brand',
+    categoryKeys: uniq(props.map((p) => p.category_key)), categoryLabels: uniq(props.map((p) => p.categories?.label)), markets: uniq(props.map((p) => p.market)), propertyNames: uniq(props.map((p) => p.name)), partners
+  }
+}

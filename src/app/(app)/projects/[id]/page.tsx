@@ -3,9 +3,12 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import { supabaseBrowser } from '@/lib/supabaseBrowser'
+import ClosureControls from '@/components/ClosureControls'
+import CaseStudyPanel from '@/components/CaseStudyPanel'
+import ChatImport from '@/components/ChatImport'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-type Tab = 'checklist' | 'deliverables' | 'metrics' | 'parties' | 'log' | 'upsells'
+type Tab = 'checklist' | 'deliverables' | 'metrics' | 'parties' | 'log' | 'case_study' | 'upsells'
 const STATUS_STYLE: Record<string, string> = { planned: 'text-muted', partial: 'text-amber', delivered: 'text-green-400', missed: 'text-red-400', replaced: 'text-muted line-through' }
 
 export default function ProjectPage() {
@@ -77,6 +80,7 @@ export default function ProjectPage() {
         {canManage && <div className="flex gap-2"><button className="text-xs underline text-muted" onClick={() => { const n = window.prompt('Project name:', p.name); if (n && n !== p.name) act(`/api/projects/${id}`, 'PATCH', { name: n }) }}>Rename</button>
           <select className={`${inp} text-xs`} value={p.owner_id ?? ''} onChange={(e) => e.target.value && act(`/api/projects/${id}`, 'PATCH', { owner_id: e.target.value }, 'Owner changed.')}><option value="">Change owner…</option>{staff.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}</select></div>}
       </div>
+      <ClosureControls projectId={id} project={p} renewal={d.renewal_proposal} canManage={canManage} onChange={async (m) => { if (m) setNotice(m); await load() }} />
       <div className="grid grid-cols-4 gap-3 my-4">
         {[['Paperwork gate', d.checklist.gate.overall === 'cleared' ? 'Cleared' : 'Open', d.checklist.gate.overall === 'cleared' ? 'text-green-400' : 'text-amber', `brand ${d.checklist.gate.brand} · team ${d.checklist.gate.team}`],
           ['Checklist', pct(d.checklist.overall_pct), '', 'steps done, N/A excluded'], ['Delivery', pct(sum.pct), '', `${sum.counted} deliverable${sum.counted === 1 ? '' : 's'} · ${sum.missed} missed${d.proof_missing ? ` · ${d.proof_missing} without proof` : ''}`],
@@ -84,7 +88,7 @@ export default function ProjectPage() {
           <div key={l} className="bg-panel border border-line rounded-xl p-3"><div className="text-xs font-mono text-muted uppercase">{l}</div><div className={`text-xl font-semibold ${c}`}>{v}</div><div className="text-xs text-muted">{s}</div></div>))}
       </div>
       {error && <div className="text-red-400 text-sm mb-2">{error}</div>}{notice && <div className="text-green-400 text-sm mb-2">{notice}</div>}
-      <div className="flex gap-2 mb-4">{(['checklist', 'deliverables', 'metrics', 'parties', 'log', 'upsells'] as Tab[]).map((t) => <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded text-sm capitalize ${tab === t ? 'bg-amber text-black font-semibold' : 'border border-line text-muted'}`}>{t === 'log' ? 'Communication log' : t}</button>)}</div>
+      <div className="flex gap-2 mb-4">{(['checklist', 'deliverables', 'metrics', 'parties', 'log', 'case_study', 'upsells'] as Tab[]).map((t) => <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded text-sm capitalize ${tab === t ? 'bg-amber text-black font-semibold' : 'border border-line text-muted'}`}>{t === 'log' ? 'Communication log' : t === 'case_study' ? 'Case study' : t}</button>)}</div>
 
       {tab === 'checklist' && (<div>
         {d.checklist.phases.map((ph: any) => (
@@ -157,7 +161,10 @@ export default function ProjectPage() {
           <button disabled={!pf.name.trim()} onClick={async () => { if (await act(`/api/projects/${id}/parties`, 'POST', { role: pf.role, name: pf.name, contact: pf.contact || undefined, side: pf.role === 'other' ? 'delivery' : undefined })) setPf({ ...pf, name: '', contact: '' }) }} className="bg-amber text-black font-semibold px-3 py-1.5 rounded-md text-sm disabled:opacity-40">Add party</button></div>
       </div>)}
 
+      {tab === 'case_study' && <CaseStudyPanel projectId={id} closed={p.status === 'closed'} canManage={canManage} onChange={load} />}
+
       {tab === 'log' && comms && (<div>
+        <ChatImport projectId={id} onDone={async () => { await load(); await loadComms() }} />
         <p className="text-sm mb-3">{comms.requests.total === 0 ? 'No open requests.' : <><b className={comms.requests.onUs ? 'text-red-400' : ''}>{comms.requests.onUs} waiting on us</b> · {comms.requests.onThem} waiting on them{comms.requests.oldestDays != null && <span className="text-muted"> · oldest {comms.requests.oldestDays} day{comms.requests.oldestDays === 1 ? '' : 's'}</span>}</>}</p>
         <div className="bg-panel border border-line rounded-xl p-3 mb-4">
           <div className="flex gap-2 mb-2 flex-wrap">
