@@ -63,7 +63,7 @@ const failures: string[] = []
 let passed = 0
 async function step(name: string, fn: () => Promise<void>) {
   try { await fn(); passed++; console.log('  ok   ' + name) }
-  catch (e: any) { failures.push(`${name}\n         ${String(e.message).split('\n').slice(0, 16).join('\n         ')}`); console.log('  FAIL ' + name) }
+  catch (e: any) { const at = String(e.stack ?? '').split('\n').find((l) => l.includes('run.ts:'))?.trim().replace(/.*run\.ts:/, 'run.ts line ') ?? ''; failures.push(`${name}\n         ${String(e.message).split('\n').slice(0, 16).join('\n         ')}${at ? `\n         [${at}]` : ''}`); console.log('  FAIL ' + name) }
 }
 const near = (a: number, b: number) => Math.abs(a - b) < 0.01
 
@@ -112,6 +112,10 @@ async function main() {
     makeGood: await load('deliverables/[id]/make-good'), invAdj: await load('deliverables/[id]/invoice-adjustment'),
     metricDefs: await load('metric-definitions'), metricDefById: await load('metric-definitions/[category]/[key]'), metrics: await load('projects/[id]/metrics'), metricVoid: await load('projects/[id]/metrics/[mid]/void'),
     proofs: await load('deliverables/[id]/proofs'), proofById: await load('deliverables/[id]/proofs/[proofId]'),
+    closure: await load('projects/[id]/closure'), closeProject: await load('projects/[id]/close'), reopen: await load('projects/[id]/reopen'),
+    caseStudy: await load('projects/[id]/case-study'), csApprove: await load('projects/[id]/case-study/approve'), csWithdraw: await load('projects/[id]/case-study/withdraw'),
+    csList: await load('case-studies'), csById: await load('case-studies/[id]'), csSuggest: await load('case-studies/suggest'),
+    chatPreview: await load('projects/[id]/chat-import/preview'), chatConfirm: await load('projects/[id]/chat-import/confirm'),
     files: await load('contracts/[id]/files'), fileById: await load('contracts/[id]/files/[fileId]'), changePw2: await load('account/change-password')
   }
 
@@ -1443,6 +1447,182 @@ async function main() {
     await call(H.comms.POST, { as: TEAM, method: 'POST', body: { direction: 'outbound', channel: 'email', kind: 'update', summary: 'ack' }, params: { id: S.pThird } })
     assert.equal((await call(H.notifications.GET, { as: MANAGER })).status, 200)
   })
+  console.log('\nStage 3 — closure, renewal, case studies, repository, pitch suggestions, chat import (L22–L25, L30)')
+  const closeIt = (pid: string, body: unknown = {}, as = MANAGER) => call(H.closeProject.POST, { as, method: 'POST', body, params: { id: pid } })
+  const reopenIt = (pid: string, body: unknown = {}, as = MANAGER) => call(H.reopen.POST, { as, method: 'POST', body, params: { id: pid } })
+  const study = (pid: string) => call(H.caseStudy.GET, { as: TEAM, params: { id: pid } })
+  const brandName = (await svc.from('brands').select('name').eq('id', S.Blitz).single()).data!.name as string
+  const ACK = { acknowledge: true, note: 'Brand agreed the remaining items are out of scope' }
+
+  await step('L22: closing is a RECORDED decision — open items are listed, need an acknowledgement AND a reason, and Team cannot close', async () => {
+    const d = await winDeal('team', 'closure'); S.closeP = d.projectId
+    const chk = await call(H.closure.GET, { as: TEAM, params: { id: S.closeP } }); assert.equal(chk.status, 200)
+    assert.deepEqual(chk.json.issues.map((i: any) => i.code), ['steps_open', 'no_contract']); assert.equal(chk.json.issues[0].count, await flat('full'), 'every checklist step is still open')
+    assert.equal((await closeIt(S.closeP, ACK, TEAM)).status, 403, 'only Manager/CEO close a project')
+    const noAck = await closeIt(S.closeP); assert.equal(noAck.status, 409); assert.equal(noAck.json.requires_acknowledgement, true); assert.equal(noAck.json.issues.length, 2)
+    for (const bad of [{ acknowledge: true }, { acknowledge: true, note: 'ok' }, { acknowledge: 'true', note: 'a real reason here' }, { note: 'a real reason here' }]) assert.equal((await closeIt(S.closeP, bad)).status, 409, JSON.stringify(bad))
+    assert.equal((await svc.from('projects').select('status').eq('id', S.closeP).single()).data!.status, 'active', 'nothing closed yet')
+    assert.equal(await count('proposals', { renewal_of_project_id: S.closeP }), 0, 'and no renewal proposal made by the refused attempts')
+    const ok = await closeIt(S.closeP, ACK); assert.equal(ok.status, 200, JSON.stringify(ok.json)); assert.equal(ok.json.closed, true); assert.equal(ok.json.renewal_created, true)
+    const row = (await svc.from('projects').select('status, closed_at, closed_by, closure_note, closure_warnings').eq('id', S.closeP).single()).data!
+    assert.deepEqual([row.status, row.closed_by, row.closure_note, !!row.closed_at], ['closed', MANAGER, ACK.note, true]); assert.deepEqual(row.closure_warnings.map((w: any) => w.code), ['steps_open', 'no_contract'], 'exactly what was open is on record')
+    assert.equal((await closeIt(S.closeP, ACK)).status, 409, 'already closed'); assert.equal((await closeIt(NIL, ACK)).status, 404); assert.equal((await closeIt('nope', ACK)).status, 404)
+    const d2 = (await proj(S.closeP)).json; assert.deepEqual([d2.project.closed_by_name, d2.project.closure_note, d2.renewal_proposal.id], ['manager user', ACK.note, ok.json.renewal_proposal_id])
+  })
+
+  await step('L22: the renewal proposal is a Draft for the same brand and route, linked to the project — and closing again never makes a second one', async () => {
+    const rows = (await svc.from('proposals').select('id, stage, brand_id, route_id, brief, created_by, renewal_of_project_id').eq('renewal_of_project_id', S.closeP)).data!
+    assert.equal(rows.length, 1); const r = rows[0]; const orig = (await svc.from('proposals').select('brand_id, route_id').eq('id', (await svc.from('deals').select('proposal_id').eq('id', (await svc.from('projects').select('deal_id').eq('id', S.closeP).single()).data!.deal_id).single()).data!.proposal_id).single()).data!
+    assert.deepEqual([r.stage, r.brand_id, r.route_id, r.created_by], ['Draft', orig.brand_id, orig.route_id, MANAGER]); assert.match(r.brief, /^Renewal of "/)
+    assert.equal((await call(H.proposal.GET, { as: TEAM, params: { id: r.id } })).status, 200, 'it opens like any proposal')
+    assert.equal((await reopenIt(S.closeP, { reason: 'x' })).status, 400); assert.equal((await reopenIt(S.closeP, { reason: 'Brand changed their mind' }, TEAM)).status, 403)
+    assert.equal((await reopenIt(S.closeP, { reason: 'Brand changed their mind' })).status, 200); assert.equal((await reopenIt(S.closeP, { reason: 'Brand changed their mind' })).status, 409, 'not closed any more')
+    assert.deepEqual(((await svc.from('projects').select('status, closed_at, closed_by, closure_note').eq('id', S.closeP).single()).data), { status: 'active', closed_at: null, closed_by: null, closure_note: null })
+    const again = await closeIt(S.closeP, ACK); assert.equal(again.status, 200); assert.equal(again.json.renewal_created, false); assert.equal(again.json.renewal_proposal_id, r.id); assert.equal(await count('proposals', { renewal_of_project_id: S.closeP }), 1)
+    assert.ok(await count('audit_events', { action: 'project_closed' }) >= 2 && await count('audit_events', { action: 'project_reopened' }) >= 1)
+  })
+
+  await step('L22: a closed project\'s delivery record is LOCKED through every route; the log stays open; reopening unlocks; a closed project stops raising alerts', async () => {
+    const d = await winDeal('team', 'lock'); S.lockP = d.projectId; S.lockDeal = d.dealId
+    const ctr = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: d.dealId, renewal_date: '2027-01-01' } }); assert.equal(ctr.status, 201); S.lockCtr = ctr.json.id
+    const del = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description: 'Lock posts', planned_quantity: 2, unit: 'posts' }, params: { id: S.lockCtr } }); assert.equal(del.status, 201); S.lockDel = del.json.id
+    assert.equal((await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 2 }, params: { id: S.lockDel } })).status, 200)
+    assert.equal((await rec(S.lockP, { metric_key: 'matches', value: 3, source: 'Broadcaster', deliverable_id: S.lockDel })).status, 201); S.lockMetric = (await svc.from('project_metrics').select('id').eq('project_id', S.lockP).single()).data!.id
+    assert.equal((await call(H.proofs.POST, { as: TEAM, method: 'POST', body: { url: 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view' }, params: { id: S.lockDel } })).status, 201); S.lockProof = (await svc.from('deliverable_proofs').select('id').eq('deliverable_id', S.lockDel).single()).data!.id
+    const party = await call(H.parties.POST, { as: TEAM, method: 'POST', body: { role: 'other', side: 'delivery', name: 'Photographer' }, params: { id: S.lockP } }); assert.equal(party.status, 201); const partyId = party.json.parties.find((x: any) => x.name === 'Photographer').id
+    const ask = await call(H.comms.POST, { as: TEAM, method: 'POST', body: { direction: 'inbound', channel: 'email', kind: 'request', summary: 'Please resend the deck' }, params: { id: S.lockP } }); assert.equal(ask.status, 201)
+    const stepItem = items(await proj(S.lockP)).find((i: any) => i.status === 'open' && !i.auto_rule)
+    assert.ok((await call(H.notifications.GET, { as: TEAM })).json.find((g: any) => g.title === 'Waiting on us').items.some((i: any) => i.detail.includes('resend the deck')), 'alerting while active')
+
+    const chk = await call(H.closure.GET, { as: TEAM, params: { id: S.lockP } }); assert.deepEqual(chk.json.issues.map((i: any) => i.code), ['waiting_on_us', 'steps_open']); assert.equal(chk.json.issues[1].count, (await flat('full')) - 1, 'the contract step ticked itself')
+    assert.equal((await closeIt(S.lockP, ACK)).status, 200)
+
+    const locked = async (r: Promise<any>, what: string, want = [400, 409]) => { const x = await r; assert.ok(want.includes(x.status), `${what}: got ${x.status} ${JSON.stringify(x.json).slice(0, 120)}`); assert.match(String(x.json.error), /closed.*locked|locked/i, what) }
+    await locked(call(H.checklistItem.PATCH, { as: TEAM, method: 'PATCH', body: { status: 'done' }, params: { id: S.lockP, itemId: stepItem.id } }), 'tick a step')
+    await locked(call(H.checklistAdd.POST, { as: TEAM, method: 'POST', body: { phase_no: 1, title: 'Late custom step', side: 'team' }, params: { id: S.lockP } }), 'add a step')
+    await locked(call(H.parties.POST, { as: TEAM, method: 'POST', body: { role: 'other', side: 'delivery', name: 'Late party' }, params: { id: S.lockP } }), 'add a party')
+    await locked(call(H.partyById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.lockP, partyId } }), 'archive a party')
+    await locked(rec(S.lockP, { metric_key: 'matches', value: 9, source: 'late' }), 'record a metric')
+    await locked(call(H.metricVoid.POST, { as: TEAM, method: 'POST', body: { reason: 'late change' }, params: { id: S.lockP, mid: S.lockMetric } }), 'void a metric')
+    await locked(call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 1 }, params: { id: S.lockDel } }), 'change a delivered quantity')
+    await locked(call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description: 'Late addition' }, params: { id: S.lockCtr } }), 'add a deliverable')
+    useFakeDrive()
+    try {
+      const names = fake.names.length
+      await locked(call(H.proofs.POST, { as: TEAM, method: 'POST', body: { url: 'https://drive.google.com/file/d/2AbCdEfGhIjKlMnOp/view' }, params: { id: S.lockDel } }), 'attach a proof link', [409])
+      await locked(call(H.proofs.POST, { as: TEAM, method: 'POST', form: form(Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('z'.repeat(40))]), 'late.png'), params: { id: S.lockDel } }), 'upload a proof file', [409])
+      assert.equal(fake.names.length, names, 'refused BEFORE Drive was touched — no orphan file left behind')
+    } finally { restoreDrive() }
+    await locked(call(H.proofById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.lockDel, proofId: S.lockProof } }), 'archive a proof')
+
+    assert.equal((await call(H.comms.POST, { as: TEAM, method: 'POST', body: { direction: 'outbound', channel: 'email', kind: 'update', summary: 'Sent the deck' }, params: { id: S.lockP } })).status, 201, 'the log stays open')
+    assert.equal((await call(H.commResolve.POST, { as: TEAM, method: 'POST', body: {}, params: { id: S.lockP, cid: ask.json.id } })).status, 200, 'and requests can still be resolved')
+    assert.equal((await proj(S.lockP)).status, 200); assert.equal((await metricsOf(S.lockP)).status, 200, 'reading is never locked')
+    assert.ok(!(await call(H.notifications.GET, { as: TEAM })).json.find((g: any) => g.title === 'Waiting on us')?.items.some((i: any) => i.link === `/projects/${S.lockP}`), 'a closed project no longer raises alerts')
+    assert.equal(await count('project_metrics', { project_id: S.lockP }), 1); assert.equal(await count('deliverable_proofs', { deliverable_id: S.lockDel }), 1, 'nothing slipped in')
+
+    assert.equal((await reopenIt(S.lockP, { reason: 'Brand sent late results' })).status, 200)
+    assert.equal((await rec(S.lockP, { metric_key: 'matches', value: 4, source: 'late results' })).status, 201, 'reopened: editable again'); assert.equal((await call(H.checklistItem.PATCH, { as: TEAM, method: 'PATCH', body: { status: 'done' }, params: { id: S.lockP, itemId: stepItem.id } })).status, 200)
+    assert.equal((await closeIt(S.lockP, ACK)).status, 200, 'closed again, ready for its case study')
+  })
+
+  await step('L23: the case study is drafted from the RECORDS — every figure copied — and anonymised by derivation; only for a closed project', async () => {
+    const open = await call(H.caseStudy.POST, { as: TEAM, method: 'POST', body: {}, params: { id: S.pFull } }); assert.equal(open.status, 409); assert.match(open.json.error, /Close the project first/)
+    const r = await call(H.caseStudy.POST, { as: TEAM, method: 'POST', body: {}, params: { id: S.lockP } }); assert.equal(r.status, 201, JSON.stringify(r.json).slice(0, 200)); const cs = r.json.case_study
+    const pname = (await svc.from('projects').select('name').eq('id', S.lockP).single()).data!.name
+    assert.deepEqual([cs.status, cs.title, cs.brand_name, cs.category_keys, cs.markets, cs.property_names, cs.delivery_pct, cs.named_use_approved], ['draft', pname, brandName, ['team'], ['S3land'], ['S3 lock'], 100, false])
+    assert.match(cs.body, new RegExp(`${brandName} worked with EmergeX on S3 lock in S3land`)); assert.match(cs.body, /Overall delivery: 100% across 1 deliverable\./); assert.match(cs.body, /- Lock posts: 2 of 2 posts \(100%\), proof on file/)
+    assert.match(cs.body, new RegExp(`- Matches: 7 \\(total of 2 readings, as of ${isoDay(0)}\\)`)); assert.deepEqual(cs.results.map((x: any) => [x.label, x.value]), [['Matches', 7]], 'both readings (3 + 4, both project-level or per deliverable) are copied, not invented')
+    assert.ok(!cs.anonymised_body.includes(brandName) && !cs.anonymised_title.includes(brandName), 'the brand is gone from the anonymised version'); assert.ok(cs.anonymised_body.includes('the brand worked with EmergeX on S3 lock')); assert.equal(cs.anonymised_title, pname.replace(brandName, 'the brand'))
+    assert.deepEqual(r.json.leaks, []); assert.ok(!JSON.stringify(r.json).includes('hidden_names'), 'the hidden-names list is never sent to the browser')
+    const again = await call(H.caseStudy.POST, { as: TEAM, method: 'POST', body: {}, params: { id: S.lockP } }); assert.equal(again.status, 409); assert.match(again.json.error, /overwrite/)
+    assert.equal((await call(H.caseStudy.POST, { as: TEAM, method: 'POST', body: { confirm_overwrite: true }, params: { id: S.lockP } })).status, 200)
+    assert.equal((await call(H.caseStudy.GET, { as: TEAM, params: { id: NIL } })).status, 404)
+  })
+
+  await step('L23/L24: edit, the leak guards, approval (Manager/CEO), edit-after-approval withdraws it, and D16 named use is opt-in', async () => {
+    const edit = (body: unknown, as = TEAM) => call(H.caseStudy.PATCH, { as, method: 'PATCH', body, params: { id: S.lockP } }); const approve = (body: unknown = {}, as = MANAGER) => call(H.csApprove.POST, { as, method: 'POST', body, params: { id: S.lockP } })
+    const base = (await study(S.lockP)).json.case_study.body as string
+    assert.equal((await edit({})).status, 400, 'nothing to change'); assert.equal((await edit({ title: '  ' })).status, 400); assert.equal((await edit({ body: 'x'.repeat(20001) })).status, 400)
+    const leaky = await edit({ body: base + `\n\n${brandName}krieg tactics won the match.` }); assert.equal(leaky.status, 200); assert.deepEqual(leaky.json.leaks, [brandName], 'a name hiding INSIDE another word is flagged for a human')
+    assert.equal((await approve({}, TEAM)).status, 403, 'Team drafts and edits; Manager/CEO approve')
+    const blocked = await approve(); assert.equal(blocked.status, 409); assert.deepEqual(blocked.json.leaks, [brandName]); assert.match(blocked.json.error, new RegExp(`still contains: ${brandName}`))
+    const withBrand = await edit({ body: base + `\n\n${brandName} praised the activation, and Apex Sports Media delivered it.` }); assert.deepEqual(withBrand.json.leaks, [], 'a name written in full is simply replaced'); assert.match(withBrand.json.case_study.anonymised_body, /the brand praised the activation, and a partner delivered it\./)
+    const ok = await approve(); assert.equal(ok.status, 200, JSON.stringify(ok.json).slice(0, 200)); assert.deepEqual([ok.json.case_study.status, ok.json.case_study.named_use_approved], ['approved', false], 'D16: anonymised by default')
+    const row = (await svc.from('case_studies').select('approved_by, approved_at').eq('project_id', S.lockP).single()).data!; assert.equal(row.approved_by, MANAGER); assert.ok(row.approved_at)
+    assert.equal((await approve()).status, 409, 'already approved')
+    const drift = await edit({ title: 'A revised title' }); assert.equal(drift.json.approval_withdrawn, true); assert.equal(drift.json.case_study.status, 'draft', 'ANY edit takes an approved study back to draft')
+    const named = await approve({ named_use_approved: true }); assert.equal(named.json.case_study.named_use_approved, true)
+    const guard = await svc.from('case_studies').update({ anonymised_body: `${brandName} slipped back in` }).eq('project_id', S.lockP); assert.match(guard.error?.message ?? '', /still contains/, 'the DATABASE refuses it even if the app were bypassed')
+    assert.equal((await call(H.csWithdraw.POST, { as: TEAM, method: 'POST', params: { id: S.lockP } })).status, 403)
+    assert.equal((await call(H.csWithdraw.POST, { as: MANAGER, method: 'POST', params: { id: S.lockP } })).status, 200); assert.equal((await call(H.csWithdraw.POST, { as: MANAGER, method: 'POST', params: { id: S.lockP } })).status, 409)
+    const after = (await study(S.lockP)).json.case_study; assert.deepEqual([after.status, after.named_use_approved], ['draft', false], 'withdrawing also withdraws named use')
+    assert.equal((await approve()).status, 200); assert.ok(await count('audit_events', { action: 'case_study_approved' }) >= 3 && await count('audit_events', { action: 'case_study_edited' }) >= 3)
+  })
+
+  const approveOne = (pid: string) => call(H.csApprove.POST, { as: MANAGER, method: 'POST', body: {}, params: { id: pid } })
+  await step('L24: the repository — approved studies, filterable by brand, category, market, property and text; staff only; no hidden names', async () => {
+    const o = await winDeal('ooh_led', 'repo ooh'); S.oohP = o.projectId; await svc.from('properties').update({ market: 'Narnia' }).eq('name', 'S3 repo ooh')   // changed BEFORE the case study is drafted, so its market tag is Narnia
+    assert.equal((await closeIt(S.oohP, ACK)).status, 200); assert.equal((await call(H.caseStudy.POST, { as: TEAM, method: 'POST', body: {}, params: { id: S.oohP } })).status, 201)
+    assert.equal((await call(H.caseStudy.POST, { as: TEAM, method: 'POST', body: {}, params: { id: S.closeP } })).status, 201)
+    const list = async (q = '', as = TEAM) => (await call(H.csList.GET, { as, query: q })).json
+    assert.deepEqual((await list()).map((x: any) => x.project_id), [S.lockP], 'only APPROVED studies by default (the other two are drafts)')
+    assert.equal((await list('?status=draft')).length, 2); assert.equal((await list('?status=all')).length, 3); assert.equal((await call(H.csList.GET, { as: TEAM, query: '?status=bogus' })).status, 400)
+    assert.equal((await approveOne(S.oohP)).status, 200); assert.equal((await approveOne(S.closeP)).status, 200)
+    const all = await list(); assert.equal(all.length, 3); assert.ok(all.every((x: any) => !('body' in x) && !('hidden_names' in x)), 'the list is light and never carries hidden names')
+    assert.deepEqual((await list('?category=ooh_led')).map((x: any) => x.project_id), [S.oohP]); assert.deepEqual((await list('?market=narnia')).map((x: any) => x.project_id), [S.oohP], 'case-insensitive'); assert.equal((await list('?market=S3land')).length, 2)
+    assert.deepEqual((await list('?property=S3 lock')).map((x: any) => x.project_id), [S.lockP]); assert.equal((await list(`?brand=${brandName.toLowerCase()}`)).length, 3); assert.equal((await list('?brand=zzzz')).length, 0)
+    assert.deepEqual((await list('?q=repo ooh')).map((x: any) => x.project_id), [S.oohP]); assert.equal((await list('?category=ooh_led&market=S3land')).length, 0, 'filters combine')
+    const one = await call(H.csById.GET, { as: TEAM, params: { id: all[0].id } }); assert.equal(one.status, 200); assert.ok(one.json.body && one.json.anonymised_body && !('hidden_names' in one.json)); assert.equal((await call(H.csById.GET, { as: TEAM, params: { id: NIL } })).status, 404); assert.equal((await call(H.csById.GET, { as: TEAM, params: { id: 'nope' } })).status, 404)
+  })
+
+  await step('L25: pitch suggestions rank by shared category, market and property; ANONYMISED unless the brand agreed to be named (D16); never the same brand; never drafts', async () => {
+    const lockItem = (await svc.from('items').select('id').eq('name', 'S3 item lock').single()).data!.id
+    const pr = await call(H.proposals.POST, { as: TEAM, method: 'POST', body: { brand_id: S.tiered, route_id: S.rBlitz } }); assert.equal(pr.status, 201); const pid = pr.json.id
+    assert.equal((await call(H.lines.POST, { as: TEAM, method: 'POST', body: { item_id: lockItem }, params: { id: pid } })).status, 201)
+    const sug = async (q: string, as = TEAM) => call(H.csSuggest.GET, { as, query: q })
+    const r = await sug(`?proposal_id=${pid}`); assert.equal(r.status, 200, JSON.stringify(r.json).slice(0, 200)); const ids = r.json.suggestions.map((x: any) => [x.project_id, x.score])
+    assert.deepEqual(ids, [[S.lockP, 7], [S.closeP, 5]], 'lock: category 3 + market 2 + property 2; closure: category 3 + market 2; the ooh study shares nothing'); assert.deepEqual(r.json.suggestions[0].reasons, ['same category: team', 'same market: S3land', 'same property: S3 lock'])
+    const blob = JSON.stringify(r.json); assert.ok(!blob.includes('hidden_names') && !blob.includes(brandName), `the response names nobody: ${blob.match(new RegExp(`.{20}${brandName}.{20}`))?.[0]}`)
+    assert.ok(r.json.suggestions.every((x: any) => x.named === null && x.named_use_approved === false), 'D16: no named text unless the brand agreed')
+    assert.equal((await call(H.csApprove.POST, { as: MANAGER, method: 'POST', params: { id: S.lockP } })).status, 409, 'already approved')
+    await call(H.csWithdraw.POST, { as: MANAGER, method: 'POST', params: { id: S.lockP } }); assert.equal((await call(H.csApprove.POST, { as: MANAGER, method: 'POST', body: { named_use_approved: true }, params: { id: S.lockP } })).status, 200)
+    const named = (await sug(`?proposal_id=${pid}`)).json.suggestions.find((x: any) => x.project_id === S.lockP); assert.equal(named.named_use_approved, true); assert.ok(named.named.title === 'A revised title' && named.named.text.includes(brandName), 'named text appears only once the brand agreed (and it is the team\'s edited text)'); assert.ok(!named.text.includes(brandName), 'and the anonymised text stays anonymised')
+    const own = await call(H.proposals.POST, { as: TEAM, method: 'POST', body: { brand_id: S.Blitz, route_id: S.rBlitz } }); await call(H.lines.POST, { as: TEAM, method: 'POST', body: { item_id: lockItem }, params: { id: own.json.id } })
+    assert.deepEqual((await sug(`?proposal_id=${own.json.id}`)).json.suggestions, [], 'a brand is never shown its own past project as "relevant work"')
+    assert.deepEqual((await sug('?category_key=ooh_led&market=Narnia')).json.suggestions.map((x: any) => x.project_id), [S.oohP], 'or give the filters by hand')
+    await call(H.csWithdraw.POST, { as: MANAGER, method: 'POST', params: { id: S.oohP } }); assert.deepEqual((await sug('?category_key=ooh_led')).json.suggestions, [], 'a draft is never suggested')
+    assert.equal((await sug('?proposal_id=nope')).status, 404); assert.equal((await sug(`?proposal_id=${NIL}`)).status, 404); assert.equal((await sug('?brand_id=nope')).status, 400); assert.deepEqual((await sug('')).json.suggestions, [], 'nothing asked, nothing suggested')
+  })
+
+  await step('L30: a pasted chat is PREVIEWED (nothing saved), reviewed, then confirmed — duplicates skipped, bad entries refuse the whole import, entries marked as imported and immutable', async () => {
+    const chat = ['[12/05/2026, 10:32:15] Brand Lead: Please send the final report format?', '[12/05/2026, 10:40:00] Team User: Sending it today', 'with the screenshots attached', '[12/05/2026, 10:41:00] Messages and calls are end-to-end encrypted.', '[12/05/2026, 11:05:30] Brand Lead: Approved, go ahead'].join('\n')
+    const pv = (body: unknown, as = TEAM, id = S.pFull) => call(H.chatPreview.POST, { as, method: 'POST', body, params: { id } }); const cf = (entries: unknown, as = TEAM, id = S.pFull) => call(H.chatConfirm.POST, { as, method: 'POST', body: { entries }, params: { id } })
+    const before = await count('project_communications', { project_id: S.pFull })
+    const r = await pv({ text: chat, utc_offset_minutes: 330 }); assert.equal(r.status, 200, JSON.stringify(r.json).slice(0, 200)); const j = r.json
+    assert.deepEqual([j.format, j.count, j.skipped_system, j.invalid_dates, j.truncated], ['whatsapp_ios', 3, 1, 0, false]); assert.deepEqual(j.senders, [{ name: 'Brand Lead', messages: 2 }, { name: 'Team User', messages: 1 }])
+    assert.equal(j.messages[0].occurred_at, '2026-05-12T05:02:15.000Z', 'Mumbai time converted'); assert.deepEqual(j.messages.map((m: any) => m.suggested_kind), ['request', 'proof', 'approval'], 'a message that mentions screenshots is SUGGESTED as proof; the reviewer decides'); assert.equal(j.messages[1].text, 'Sending it today\nwith the screenshots attached'); assert.ok(j.parties.length >= 1 && j.messages.every((m: any) => m.duplicate === false))
+    assert.equal(await count('project_communications', { project_id: S.pFull }), before, 'a PREVIEW saves nothing')
+    for (const [body, want] of [[{ text: '' }, 400], [{ text: chat, date_order: 'ymd' }, 400], [{ text: chat, utc_offset_minutes: 9999 }, 400], [{ text: chat, utc_offset_minutes: 1.5 }, 400], [{ text: 'x'.repeat(200001) }, 400]] as const) assert.equal((await pv(body)).status, want, JSON.stringify(body).slice(0, 60))
+    const nc = await pv({ text: 'hello, this is not a chat export' }); assert.deepEqual([nc.status, nc.json.format, nc.json.count], [200, 'unknown', 0]); assert.equal((await pv({ text: chat }, TEAM, NIL)).status, 404); assert.equal((await pv({ text: chat }, AGENT_A)).status, 403)
+
+    const brandParty = (await svc.from('project_parties').select('id').eq('project_id', S.pFull).eq('role', 'brand_route').is('archived_at', null).limit(1)).data?.[0]?.id ?? j.parties[0].id
+    const entries = [{ occurred_at: j.messages[0].occurred_at, direction: 'inbound', channel: 'whatsapp', kind: 'request', party_id: brandParty, summary: j.messages[0].text }, { occurred_at: j.messages[1].occurred_at, direction: 'outbound', channel: 'whatsapp', kind: 'update', summary: `Team User: ${j.messages[1].text}` }, { occurred_at: j.messages[2].occurred_at, direction: 'inbound', channel: 'whatsapp', kind: 'approval', party_id: brandParty, summary: j.messages[2].text }]
+    const bad = await cf([...entries, { ...entries[0], channel: 'carrier pigeon' }]); assert.equal(bad.status, 400); assert.deepEqual(bad.json.rejected.map((x: any) => x.index), [3]); assert.equal(await count('project_communications', { project_id: S.pFull }), before, 'one bad entry: NOTHING imported')
+    for (const e of [[{ ...entries[0], party_id: S.lockPartyOther ?? NIL }], [{ ...entries[0], party_id: 'nope' }], [], 'nope']) assert.ok([400].includes((await cf(e as any)).status), JSON.stringify(e).slice(0, 50))
+    assert.equal((await cf(Array.from({ length: 201 }, () => entries[1]))).status, 400, 'at most 200 at a time'); assert.equal((await cf(entries, AGENT_A)).status, 403)
+    const waitBefore = (await proj(S.pFull)).json.requests.onUs
+    const ok = await cf(entries); assert.equal(ok.status, 201, JSON.stringify(ok.json)); assert.deepEqual([ok.json.imported, ok.json.skipped_duplicates], [3, 0])
+    const rows = (await svc.from('project_communications').select('source, created_by, kind, status, waiting_on, occurred_at, direction').eq('project_id', S.pFull).eq('source', 'chat_import').order('occurred_at')).data!
+    assert.equal(rows.length, 3); assert.ok(rows.every((x) => x.created_by === TEAM)); assert.deepEqual(rows.map((x) => [x.kind, x.status, x.waiting_on]), [['request', 'open', 'us'], ['update', 'done', null], ['approval', 'done', null]], 'an imported request is a REAL open request, waiting on us'); assert.equal(new Date(rows[0].occurred_at).toISOString(), '2026-05-12T05:02:15.000Z')
+    assert.equal((await proj(S.pFull)).json.requests.onUs, waitBefore + 1, 'the imported request counts on the project page: exactly one more waiting on us')
+    const again = await cf(entries); assert.deepEqual([again.status, again.json.imported, again.json.skipped_duplicates], [200, 0, 3], 're-pasting the same chat adds nothing')
+    assert.ok((await pv({ text: chat, utc_offset_minutes: 330 })).json.messages.every((m: any) => m.duplicate === true), 'and a second preview flags them')
+    const twin = await cf([{ ...entries[1], occurred_at: '2026-05-13T10:00:00.000Z' }, { ...entries[1], occurred_at: '2026-05-13T10:00:00.000Z' }]); assert.deepEqual([twin.json.imported, twin.json.skipped_duplicates], [1, 1], 'duplicates inside one batch too')
+    assert.ok((await svc.from('project_communications').update({ summary: 'rewritten' }).eq('source', 'chat_import').eq('project_id', S.pFull)).error, 'an imported entry cannot be edited, like any log entry')
+    assert.equal((await cf([{ ...entries[1], occurred_at: '2026-05-14T10:00:00.000Z' }], TEAM, S.lockP)).status, 201, 'the log is open on a CLOSED project too')
+  })
+
   await step('/api/health reports every migration present and no critical env missing', async () => {
     const r = await call(H.health.GET, { as: MANAGER }); assert.equal(r.status, 200, JSON.stringify(r.json))
     const bad = r.json.checks.filter((c: any) => !c.ok); assert.deepEqual(bad, [], JSON.stringify(bad))
