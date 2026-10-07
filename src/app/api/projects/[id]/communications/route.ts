@@ -4,6 +4,7 @@ import { requirePermission, writeAudit } from '@/lib/serviceLayer'
 import { supabaseService } from '@/lib/supabaseServer'
 import { loadOwnProject } from '@/lib/projectService'
 import { summariseOpenRequests, waitingOn } from '@/lib/projects'
+import { validateCommFields } from '@/lib/commLog'
 import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
@@ -35,18 +36,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     await requirePermission(profile, 'record.create')
     const project = await loadOwnProject(profile.org_id, params.id)
     const b = await req.json().catch(() => ({}))
-    if (!['inbound', 'outbound'].includes(b.direction)) throw new ApiError(400, "direction must be 'inbound' or 'outbound'")
-    if (!['whatsapp', 'telegram', 'email', 'call', 'meeting', 'other'].includes(b.channel)) throw new ApiError(400, 'channel is not valid')
-    if (!['request', 'approval', 'update', 'proof', 'other'].includes(b.kind)) throw new ApiError(400, 'kind is not valid')
-    const summary = typeof b.summary === 'string' ? b.summary.trim() : ''
-    if (!summary || summary.length > 2000) throw new ApiError(400, 'A summary of 1–2000 characters is required')
-    let occurredAt = new Date().toISOString()
-    if (b.occurred_at != null) {
-      const t = Date.parse(String(b.occurred_at))
-      if (!Number.isFinite(t)) throw new ApiError(400, 'occurred_at is not a valid date')
-      if (t > Date.now() + 86_400_000) throw new ApiError(400, 'occurred_at cannot be in the future')
-      occurredAt = new Date(t).toISOString()
-    }
+    const f = validateCommFields(b)
     const svc = supabaseService()
     if (b.party_id != null) {
       if (!isUuid(b.party_id)) throw new ApiError(400, 'party_id is not valid')
@@ -67,13 +57,13 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       } else throw new ApiError(400, "related_type must be 'deliverable' or 'checklist_item'")
       relatedType = b.related_type; relatedId = b.related_id
     }
-    const isRequest = b.kind === 'request'
+    const isRequest = f.kind === 'request'
     const { data, error } = await svc.from('project_communications').insert({
-      org_id: profile.org_id, project_id: project.id, party_id: b.party_id ?? null, direction: b.direction, channel: b.channel, kind: b.kind, occurred_at: occurredAt, summary,
-      related_type: relatedType, related_id: relatedId, status: isRequest ? 'open' : 'done', waiting_on: isRequest ? waitingOn(b.direction) : null, created_by: profile.id
+      org_id: profile.org_id, project_id: project.id, party_id: b.party_id ?? null, direction: f.direction, channel: f.channel, kind: f.kind, occurred_at: f.occurredAt, summary: f.summary,
+      related_type: relatedType, related_id: relatedId, status: isRequest ? 'open' : 'done', waiting_on: isRequest ? waitingOn(f.direction) : null, created_by: profile.id
     }).select(SELECT).single()
     if (error) throw new ApiError(400, error.message)
-    await writeAudit({ orgId: profile.org_id, actorId: profile.id, action: 'project_communication_logged', entityType: 'project', entityId: project.id, after: { entry_id: data.id, kind: b.kind, direction: b.direction } })
+    await writeAudit({ orgId: profile.org_id, actorId: profile.id, action: 'project_communication_logged', entityType: 'project', entityId: project.id, after: { entry_id: data.id, kind: f.kind, direction: f.direction } })
     return NextResponse.json({ ...data, created_by_name: profile.full_name, party_name: (data.party as unknown as { name: string } | null)?.name ?? null, creator: undefined, party: undefined }, { status: 201 })
   } catch (err) { return errorResponse(err) }
 }
