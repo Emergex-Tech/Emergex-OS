@@ -44,3 +44,18 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
   } catch (err) { return errorResponse(err) }
 }
 export const dynamic = 'force-dynamic'
+
+/** Tick / untick "show to the brand in reports". Proof is hidden from reports until someone ticks it. */
+export async function PATCH(req: NextRequest, { params }: { params: { id: string; proofId: string } }) {
+  try {
+    const profile = await requireProfile()
+    await requirePermission(profile, 'record.update')
+    const p = await loadProof(profile.org_id, params.id, params.proofId)
+    const b = await req.json().catch(() => ({}))
+    if (typeof b.report_visible !== 'boolean') throw new ApiError(400, 'report_visible must be true or false')
+    const { error } = await supabaseService().from('deliverable_proofs').update({ report_visible: b.report_visible }).eq('id', p.id)
+    if (error) throw new ApiError(400, error.message)
+    await writeAudit({ orgId: profile.org_id, actorId: profile.id, action: 'deliverable_proof_report_visibility', entityType: 'deliverable', entityId: params.id, after: { proof_id: p.id, report_visible: b.report_visible } })
+    return NextResponse.json({ ok: true, report_visible: b.report_visible })
+  } catch (err) { return errorResponse(err) }
+}

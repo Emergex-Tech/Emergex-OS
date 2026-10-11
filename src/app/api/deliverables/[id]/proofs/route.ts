@@ -12,7 +12,7 @@ import { errorResponse } from '@/lib/apiError'
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
-const SELECT = 'id, kind, name, url, mime_type, size_bytes, note, created_at, adder:profiles!deliverable_proofs_added_by_fkey(full_name)'
+const SELECT = 'id, kind, name, url, mime_type, size_bytes, note, created_at, report_visible, adder:profiles!deliverable_proofs_added_by_fkey(full_name)'
 const shape = (p: Record<string, unknown>) => ({ ...p, added_by_name: (p.adder as { full_name: string } | null)?.full_name ?? null, adder: undefined })
 
 async function loadDeliverable(orgId: string, id: string) {
