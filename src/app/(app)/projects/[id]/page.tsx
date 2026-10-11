@@ -6,9 +6,10 @@ import { supabaseBrowser } from '@/lib/supabaseBrowser'
 import ClosureControls from '@/components/ClosureControls'
 import CaseStudyPanel from '@/components/CaseStudyPanel'
 import ChatImport from '@/components/ChatImport'
+import ReportPanel from '@/components/ReportPanel'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-type Tab = 'checklist' | 'deliverables' | 'metrics' | 'parties' | 'log' | 'case_study' | 'upsells'
+type Tab = 'checklist' | 'deliverables' | 'metrics' | 'parties' | 'log' | 'report' | 'case_study' | 'upsells'
 const STATUS_STYLE: Record<string, string> = { planned: 'text-muted', partial: 'text-amber', delivered: 'text-green-400', missed: 'text-red-400', replaced: 'text-muted line-through' }
 
 export default function ProjectPage() {
@@ -88,7 +89,7 @@ export default function ProjectPage() {
           <div key={l} className="bg-panel border border-line rounded-xl p-3"><div className="text-xs font-mono text-muted uppercase">{l}</div><div className={`text-xl font-semibold ${c}`}>{v}</div><div className="text-xs text-muted">{s}</div></div>))}
       </div>
       {error && <div className="text-red-400 text-sm mb-2">{error}</div>}{notice && <div className="text-green-400 text-sm mb-2">{notice}</div>}
-      <div className="flex gap-2 mb-4">{(['checklist', 'deliverables', 'metrics', 'parties', 'log', 'case_study', 'upsells'] as Tab[]).map((t) => <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded text-sm capitalize ${tab === t ? 'bg-amber text-black font-semibold' : 'border border-line text-muted'}`}>{t === 'log' ? 'Communication log' : t === 'case_study' ? 'Case study' : t}</button>)}</div>
+      <div className="flex gap-2 mb-4">{(['checklist', 'deliverables', 'metrics', 'parties', 'log', 'report', 'case_study', 'upsells'] as Tab[]).map((t) => <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded text-sm capitalize ${tab === t ? 'bg-amber text-black font-semibold' : 'border border-line text-muted'}`}>{t === 'log' ? 'Communication log' : t === 'case_study' ? 'Case study' : t === 'report' ? 'Brand report' : t}</button>)}</div>
 
       {tab === 'checklist' && (<div>
         {d.checklist.phases.map((ph: any) => (
@@ -121,6 +122,7 @@ export default function ProjectPage() {
                   {openProof === x.id && (<div className="mt-2 space-y-1">
                     {(proofs[x.id] ?? []).map((pr: any) => (<div key={pr.id} className="flex gap-2 items-center"><span className="truncate max-w-[130px]" title={pr.note ?? pr.name}>{pr.kind === 'link' ? '🔗 ' : '📎 '}{pr.name}</span>
                       {pr.kind === 'link' ? <a href={pr.url} target="_blank" rel="noopener noreferrer" className="underline text-blue-400">open</a> : <button className="underline text-muted" onClick={() => downloadProof(x.id, pr)}>download</button>}
+                      <label className="text-[10px] text-muted whitespace-nowrap" title="Show this proof to the brand in their report"><input type="checkbox" disabled={p.status === 'closed'} checked={!!pr.report_visible} onChange={async (e) => { await fetch(`/api/deliverables/${x.id}/proofs/${pr.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ report_visible: e.target.checked }) }); await loadProofs(x.id) }} /> brand</label>
                       <button className="underline text-red-400" onClick={async () => { const r = await fetch(`/api/deliverables/${x.id}/proofs/${pr.id}`, { method: 'DELETE' }); if (r.ok) { await loadProofs(x.id); await load() } }}>remove</button></div>))}
                     <input type="file" accept=".png,.jpg,.jpeg,.pdf,.doc,.docx,.xls,.xlsx" className="text-xs w-full" onChange={(e) => { const f = e.target.files?.[0]; if (f) { const fd = new FormData(); fd.append('file', f); sendProof(x.id, { method: 'POST', body: fd }, 'Proof uploaded.'); e.target.value = '' } }} />
                     <div className="flex gap-1"><input className={`${inp} text-xs flex-1`} placeholder="…or paste a Google Drive link" value={proofUrl} onChange={(e) => setProofUrl(e.target.value)} /><button disabled={!proofUrl.trim()} className="underline text-muted" onClick={async () => { await sendProof(x.id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: proofUrl }) }, 'Link added.'); setProofUrl('') }}>add</button></div>
@@ -160,6 +162,8 @@ export default function ProjectPage() {
           <input className={`${inp} flex-1`} placeholder="Name" value={pf.name} onChange={(e) => setPf({ ...pf, name: e.target.value })} /><input className={`${inp} flex-1`} placeholder="Contact (optional)" value={pf.contact} onChange={(e) => setPf({ ...pf, contact: e.target.value })} />
           <button disabled={!pf.name.trim()} onClick={async () => { if (await act(`/api/projects/${id}/parties`, 'POST', { role: pf.role, name: pf.name, contact: pf.contact || undefined, side: pf.role === 'other' ? 'delivery' : undefined })) setPf({ ...pf, name: '', contact: '' }) }} className="bg-amber text-black font-semibold px-3 py-1.5 rounded-md text-sm disabled:opacity-40">Add party</button></div>
       </div>)}
+
+      {tab === 'report' && <ReportPanel projectId={id} deliverables={d.deliverables.items.filter((x: any) => x.status !== 'replaced').map((x: any) => ({ id: x.id, description: x.description }))} canManage={canManage} closed={p.status === 'closed'} />}
 
       {tab === 'case_study' && <CaseStudyPanel projectId={id} closed={p.status === 'closed'} canManage={canManage} onChange={load} />}
 

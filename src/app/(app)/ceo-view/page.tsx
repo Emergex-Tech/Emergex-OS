@@ -11,6 +11,7 @@ interface Summary {
     recent_vendor_rate_changes: { item_name: string; type: string; amount: number; currency: string; price_date: string }[]
   }
   projects: { active: number; avg_delivery_pct: number | null; gates_open: number; waiting_on_us: number; delivery_at_risk: { id: string; name: string; brand_name: string; owner_name: string | null; delivery_pct: number | null; reasons: { code: string; count: number; detail: string }[] }[] }
+  reports: { active_links: number; expiring_soon: number; held_back: { project_id: string; project: string; names: string[] }[]; snapshots_overdue: number }
   team: { recent_activity: { at: string; actor: string | null; action: string; entity_type: string }[]; pending_route_scores: number; pending_overrides: number; pending_share_overrides: number }
 }
 
@@ -53,6 +54,13 @@ export default function CeoView() {
           {summary.projects.delivery_at_risk.map((p) => (<tr key={p.id} className="border-b border-line last:border-0 align-top"><td className="p-3"><Link href={`/projects/${p.id}`} className="text-blue-400 underline">{p.name}</Link><div className="text-xs text-muted">{p.brand_name} · owner {p.owner_name ?? '—'}</div></td>
             <td className="p-3 text-xs">{p.reasons.map((r) => <div key={r.code} className="text-amber">{r.detail}</div>)}</td><td className="p-3 text-right font-mono">{p.delivery_pct == null ? '—' : `${p.delivery_pct}%`}</td></tr>))}
           {summary.projects.delivery_at_risk.length === 0 && <tr><td className="p-6 text-center text-muted">No project is currently at risk.</td></tr>}</tbody></table></div>
+
+      <h2 className="text-xs font-mono text-muted uppercase mb-2">Brand reports</h2>
+      <div className="grid grid-cols-4 gap-4 mb-3">
+        <Card label="Active links" value={summary.reports.active_links} /><Card label="Expiring within 7 days" value={summary.reports.expiring_soon} tone={summary.reports.expiring_soon > 0 ? 'text-amber' : ''} />
+        <Card label="Reports held back" value={summary.reports.held_back.length} tone={summary.reports.held_back.length > 0 ? 'text-red-400' : ''} /><Card label="Snapshots overdue" value={summary.reports.snapshots_overdue} tone={summary.reports.snapshots_overdue > 0 ? 'text-amber' : ''} />
+      </div>
+      {summary.reports.held_back.length > 0 && <div className="bg-panel border border-red-800 rounded-xl p-3 mb-6 text-sm">{summary.reports.held_back.map((h) => <div key={h.project_id}><Link href={`/projects/${h.project_id}`} className="text-blue-400 underline">{h.project}</Link> <span className="text-red-400">— the brand sees nothing: the report contains {h.names.join(', ')}</span></div>)}</div>}
 
       <h2 className="text-xs font-mono text-muted uppercase mb-2">Inventory</h2>
       <div className="grid grid-cols-4 gap-4 mb-6">
