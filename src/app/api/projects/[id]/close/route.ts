@@ -3,6 +3,7 @@ import { requireProfile, ApiError } from '@/lib/auth'
 import { requirePermission, writeAudit } from '@/lib/serviceLayer'
 import { supabaseService } from '@/lib/supabaseServer'
 import { loadClosureFacts, ensureRenewalProposal } from '@/lib/projectService'
+import { takeSnapshot } from '@/lib/reportService'
 import { closureIssues, closureDecision } from '@/lib/closure'
 import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
@@ -34,7 +35,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     if (error) throw new ApiError(400, error.message)
     if (!closed) throw new ApiError(409, 'This project was closed by someone else a moment ago')
     await writeAudit({ orgId: profile.org_id, actorId: profile.id, action: 'project_closed', entityType: 'project', entityId: p.id, after: { issues: issues.map((i) => i.code), note: decision.note, renewal_proposal_id: renewal.id } })
-    return NextResponse.json({ closed: true, renewal_proposal_id: renewal.id, renewal_created: renewal.created, issues })
+    // L22: the FINAL report is locked in as a snapshot of the record that was just locked. If that fails the project stays closed and it is reported, never hidden.
+    let finalSnapshot: { id: string; blocked: boolean } | null = null
+    try { const s = await takeSnapshot(profile.org_id, { id: p.id, name: p.name, deal_id: p.deal_id, status: 'closed' }, { trigger: 'closing', takenBy: profile.id }); finalSnapshot = { id: s.id, blocked: s.leaks.length > 0 } }
+    catch (e) { await writeAudit({ orgId: profile.org_id, actorId: profile.id, action: 'report_final_snapshot_failed', entityType: 'project', entityId: p.id, after: { error: e instanceof Error ? e.message : String(e) } }) }
+    return NextResponse.json({ closed: true, renewal_proposal_id: renewal.id, renewal_created: renewal.created, issues, final_report: finalSnapshot })
   } catch (err) { return errorResponse(err) }
 }
 export const dynamic = 'force-dynamic'
