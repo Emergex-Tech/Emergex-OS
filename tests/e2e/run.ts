@@ -26,6 +26,8 @@ process.env.SUPABASE_URL = `http://127.0.0.1:${PROXY_PORT}`
 process.env.NEXT_PUBLIC_SUPABASE_URL = `http://127.0.0.1:${PROXY_PORT}`
 process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'unused'
 process.env.SUPABASE_SERVICE_ROLE_KEY = serviceJwt
+process.env.REPORT_LINKS_ENABLED = '1' // external report links are released for these tests; one test switches them off
+process.env.CRON_SECRET = 'e2e-cron-secret-0123456789abcdef'
 process.env.AGENT_ACCESS_ENABLED = '1' // the portal is released for these tests; one test switches it off to prove the kill switch
 delete process.env.GOOGLE_SERVICE_ACCOUNT_KEY // Drive is deliberately unconfigured: exercises the "Drive failed, export still works" path
 delete process.env.ANTHROPIC_API_KEY
@@ -49,11 +51,12 @@ const proxy = http.createServer((req, res) => {
 type Handler = (req: NextRequest, ctx: { params: any }) => Promise<Response>
 const load = async (path: string): Promise<Record<string, Handler>> => import(`../../src/app/api/${path}/route`)
 
-async function call(handler: Handler, o: { as?: string; method?: string; query?: string; body?: unknown; form?: FormData; params?: Record<string, string> } = {}) {
+async function call(handler: Handler, o: { as?: string; method?: string; query?: string; body?: unknown; form?: FormData; params?: Record<string, string>; headers?: Record<string, string> } = {}) {
   ;(globalThis as any).__TEST_USER__ = o.as ?? null
   const init: any = { method: o.method ?? 'GET' }
   if (o.body !== undefined) { init.body = JSON.stringify(o.body); init.headers = { 'content-type': 'application/json' } }
   if (o.form) init.body = o.form
+  if (o.headers) init.headers = { ...(init.headers ?? {}), ...o.headers }
   const res = await handler(new NextRequest(`http://localhost/api/x${o.query ?? ''}`, init), { params: o.params ?? {} })
   const json = (res.headers.get('content-type') ?? '').includes('json') ? await res.json() : null
   return { status: res.status, json, res }
@@ -112,6 +115,10 @@ async function main() {
     makeGood: await load('deliverables/[id]/make-good'), invAdj: await load('deliverables/[id]/invoice-adjustment'),
     metricDefs: await load('metric-definitions'), metricDefById: await load('metric-definitions/[category]/[key]'), metrics: await load('projects/[id]/metrics'), metricVoid: await load('projects/[id]/metrics/[mid]/void'),
     proofs: await load('deliverables/[id]/proofs'), proofById: await load('deliverables/[id]/proofs/[proofId]'),
+    report: await load('projects/[id]/report'), reportSettings: await load('projects/[id]/report/settings'), reportLinks: await load('projects/[id]/report/links'),
+    reportRevoke: await load('projects/[id]/report/links/[linkId]/revoke'), reportViews: await load('projects/[id]/report/links/[linkId]/views'),
+    reportSnaps: await load('projects/[id]/report/snapshots'), reportSnap: await load('projects/[id]/report/snapshots/[sid]'), reportPdf: await load('projects/[id]/report/pdf'),
+    pubReport: await load('public/report/[token]'), pubProof: await load('public/report/[token]/proof/[proofId]'), pubPdf: await load('public/report/[token]/pdf'), cron: await load('cron/report-snapshots'),
     closure: await load('projects/[id]/closure'), closeProject: await load('projects/[id]/close'), reopen: await load('projects/[id]/reopen'),
     caseStudy: await load('projects/[id]/case-study'), csApprove: await load('projects/[id]/case-study/approve'), csWithdraw: await load('projects/[id]/case-study/withdraw'),
     csList: await load('case-studies'), csById: await load('case-studies/[id]'), csSuggest: await load('case-studies/suggest'),
@@ -683,11 +690,12 @@ async function main() {
     // A sweep that silently finds nothing would 'pass' while proving nothing, so insist it reached a healthy number of
     // routes AND specific deeply-nested dynamic ones (that is where a recursive directory walk would go wrong).
     assert.ok(rels.length >= 75, `only ${rels.length} routes were discovered — the sweep is not covering the app`)
-    for (const must of ['health', 'finance/export', 'users/[id]/reset-password', 'contracts/[id]/files/[fileId]', 'agent/items/[id]', 'agent-access/intel/[id]/review', 'proposals/[id]/lines/[lineId]/margin'])
+    for (const must of ['health', 'finance/export', 'users/[id]/reset-password', 'contracts/[id]/files/[fileId]', 'agent/items/[id]', 'agent-access/intel/[id]/review', 'public/report/[token]', 'public/report/[token]/proof/[proofId]', 'cron/report-snapshots', 'proposals/[id]/lines/[lineId]/margin'])
       assert.ok(rels.includes(must), `the sweep did not discover ${must}`)
     const watched = ['audit_events', 'vendors', 'intel_notes', 'price_records', 'shareable_grants', 'profiles', 'proposals', 'items', 'invoices', 'payments', 'contracts', 'files', 'agent_activity']
     const before = Object.fromEntries(await Promise.all(watched.map(async (t) => [t, await count(t)])))
     const dummy = new Proxy({}, { get: () => NIL }) as Record<string, string>
+    const publicRoute = (rel: string) => rel.startsWith('public/'), cronRoute = (rel: string) => rel.startsWith('cron/')
     const agentOk = (rel: string) => rel.startsWith('agent/') || rel === 'account/change-password' || rel === 'health'
     const offenders: string[] = []; let calls = 0
     for (const rel of rels) {
@@ -696,8 +704,8 @@ async function main() {
         if (typeof mod[m] !== 'function') continue
         calls++
         const opts = (as?: string) => ({ as, method: m, params: dummy, ...(m === 'GET' || m === 'DELETE' ? {} : { body: {} }) })
-        const asAgent = await call(mod[m], opts(AGENT_A)); if (!agentOk(rel) && asAgent.status !== 403) offenders.push(`AGENT  ${m} /${rel} -> ${asAgent.status}`)
-        const anon = await call(mod[m], opts(undefined)); if (rel !== 'health' && anon.status !== 401) offenders.push(`ANON   ${m} /${rel} -> ${anon.status}`)
+        const asAgent = await call(mod[m], opts(AGENT_A)); const wantAgent = publicRoute(rel) ? 404 : cronRoute(rel) ? 401 : 403; if (!agentOk(rel) && asAgent.status !== wantAgent) offenders.push(`AGENT  ${m} /${rel} -> ${asAgent.status} (wanted ${wantAgent})`)
+        const anon = await call(mod[m], opts(undefined)); const wantAnon = publicRoute(rel) ? 404 : 401; if (rel !== 'health' && anon.status !== wantAnon) offenders.push(`ANON   ${m} /${rel} -> ${anon.status} (wanted ${wantAnon})`)
         if (rel.startsWith('agent/')) for (const u of [TEAM, MANAGER, CEO]) { const r = await call(mod[m], opts(u)); if (r.status !== 403) offenders.push(`STAFF  ${m} /${rel} as ${u.slice(0, 2)} -> ${r.status} (agent routes are for agents only)`) }
       }
     }
@@ -1074,11 +1082,11 @@ async function main() {
   const item = (d: any, title: string) => items(d).find((i: any) => i.title === title)
   const proj = (id: string, as = TEAM) => call(H.projectById.GET, { as, params: { id } })
   const flat = async (key: string) => (await svc.from('checklist_template_items').select('id').eq('template_key', key).eq('active', true)).data!.length
-  const winDeal = async (cat: string, label: string) => {
+  const winDeal = async (cat: string, label: string, routeId?: string) => {
     const pr = await call(H.properties.POST, { as: TEAM, method: 'POST', body: { name: `S3 ${label}`, category_key: cat, market: 'S3land', vendor_id: S.vendor, attributes: {} } }); assert.equal(pr.status, 201, JSON.stringify(pr.json))
     const it = await call(H.items.POST, { as: TEAM, method: 'POST', body: { property_id: pr.json.id, name: `S3 item ${label}` } })
     await call(H.prices.POST, { as: TEAM, method: 'POST', body: { item_id: it.json.id, type: 'rack', amount: 5000, currency: 'USD' } })
-    const p = await call(H.proposals.POST, { as: TEAM, method: 'POST', body: { brand_id: S.Blitz, route_id: S.rBlitz } }); const line = await call(H.lines.POST, { as: TEAM, method: 'POST', body: { item_id: it.json.id }, params: { id: p.json.id } })
+    const p = await call(H.proposals.POST, { as: TEAM, method: 'POST', body: { brand_id: S.Blitz, route_id: routeId ?? S.rBlitz } }); const line = await call(H.lines.POST, { as: TEAM, method: 'POST', body: { item_id: it.json.id }, params: { id: p.json.id } })
     await call(H.margin.PATCH, { as: MANAGER, method: 'PATCH', body: { rate: 20 }, params: { id: p.json.id, lineId: line.json.id } })
     for (const st of ['Approved', 'Sent', 'Won']) assert.equal((await call(H.stage.PATCH, { as: MANAGER, method: 'PATCH', body: { to_stage: st }, params: { id: p.json.id } })).status, 200, st)
     const deal = (await svc.from('deals').select('id').eq('proposal_id', p.json.id).single()).data!.id
@@ -1621,6 +1629,242 @@ async function main() {
     const twin = await cf([{ ...entries[1], occurred_at: '2026-05-13T10:00:00.000Z' }, { ...entries[1], occurred_at: '2026-05-13T10:00:00.000Z' }]); assert.deepEqual([twin.json.imported, twin.json.skipped_duplicates], [1, 1], 'duplicates inside one batch too')
     assert.ok((await svc.from('project_communications').update({ summary: 'rewritten' }).eq('source', 'chat_import').eq('project_id', S.pFull)).error, 'an imported entry cannot be edited, like any log entry')
     assert.equal((await cf([{ ...entries[1], occurred_at: '2026-05-14T10:00:00.000Z' }], TEAM, S.lockP)).status, 201, 'the log is open on a CLOSED project too')
+  })
+
+  console.log('\nStage 3 — live reports: preview, branding, links, the public page, snapshots, PDF (L16–L21)')
+  const { hashToken, newToken } = await import('../../src/lib/reportToken')
+  const { pdfText } = await import('../helpers_pdf')
+  const { logView } = await import('../../src/lib/reportPublic')
+  const PNGB = (tag: string) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(tag.repeat(40))])
+  const withDrive = async (fn: () => Promise<void>) => { useFakeDrive(); try { await fn() } finally { restoreDrive() } }
+  const SECRETS2 = ['Apex Sports Media', 'ADJ-NOTE-SECRET', 'SOURCE-SECRET-VENDOR', 'PROOF-NOTE-SECRET', 'COMMS-SECRET', 'CHECKLIST-SECRET', 'hidden-internal.png', 'archived-proof.png', 'team user', 'manager user', 'invoice_adjustment']
+  const BADKEY = /cost|margin|price|amount|invoice|balance|vendor|note|source|recorded|created_by|owner|email|phone|contact|reliab|tier|commission|fee/i
+  const keysOf = (v: unknown, out: string[] = []): string[] => { if (Array.isArray(v)) v.forEach((x) => keysOf(x, out)); else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) { out.push(k); keysOf(x, out) } return out }
+  const REPORT_KEYS = ['generated_at', 'as_of', 'title', 'brand_name', 'branding', 'delivery', 'deliverables', 'metrics', 'timeline']
+  const GONE = { error: 'This link is not valid or has expired' }
+  const L1 = { id: '', token: '' }   // the main report link
+  const pub = (token: string, o: { query?: string; headers?: Record<string, string>; as?: string } = {}) => call(H.pubReport.GET, { params: { token }, ...o })
+  const preview = (pid: string, as = TEAM) => call(H.report.GET, { as, params: { id: pid } })
+  const mkLink = (pid: string, body: unknown = {}, as = MANAGER) => call(H.reportLinks.POST, { as, method: 'POST', body, params: { id: pid } })
+  const viewsOf = async (linkId: string) => (await svc.from('report_views').select('kind, snapshot_id, proof_id, ip_hash, user_agent').eq('link_id', linkId).order('viewed_at')).data!
+  const putSettings = (pid: string, body: unknown, as = MANAGER) => call(H.reportSettings.PUT, { as, method: 'PUT', body, params: { id: pid } })
+
+  await step('setup: a project with a contract, deliverables, proof (some NOT for the brand) and metrics — with a SECRET planted in every internal field a report must never show', async () => {
+    const d = await winDeal('team', 'report'); S.rP = d.projectId; S.rDeal = d.dealId
+    const ctr = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: d.dealId, renewal_date: '2027-03-01' } }); assert.equal(ctr.status, 201); S.rCtr = ctr.json.id
+    const mk = async (description: string, planned: number, unit: string | undefined, due?: string) => { const r = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description, planned_quantity: planned, unit, due_date: due }, params: { id: S.rCtr } }); assert.equal(r.status, 201, JSON.stringify(r.json)); return r.json.id as string }
+    S.rA = await mk('Perimeter boards', 10, 'matches', '2026-06-10'); S.rB = await mk('Social posts', 8, 'posts', '2026-06-20'); S.rC = await mk('Hospitality', 2, undefined)
+    const dv = (id: string, q: number) => call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: q }, params: { id } })
+    assert.equal((await dv(S.rA, 10)).status, 200); assert.equal((await dv(S.rB, 6)).status, 200)
+    assert.equal((await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { status: 'missed' }, params: { id: S.rC } })).status, 200)
+    assert.equal((await call(H.invAdj.POST, { as: MANAGER, method: 'POST', body: { flag: true, note: 'ADJ-NOTE-SECRET credit 2 hospitality packages' }, params: { id: S.rC } })).status, 200)
+    for (const [del, v, on] of [[S.rA, 3, -5], [S.rA, 8, -1], [S.rB, 4, -1]] as const) assert.equal((await rec(S.rP, { metric_key: 'matches', value: v, source: 'SOURCE-SECRET-VENDOR Apex Sports Media', deliverable_id: del, recorded_on: isoDay(on) })).status, 201)
+    const step1 = items(await proj(S.rP)).find((i: any) => i.status === 'open' && !i.auto_rule); assert.equal((await call(H.checklistItem.PATCH, { as: TEAM, method: 'PATCH', body: { notes: 'CHECKLIST-SECRET internal only' }, params: { id: S.rP, itemId: step1.id } })).status, 200)
+    assert.equal((await call(H.comms.POST, { as: TEAM, method: 'POST', body: { direction: 'inbound', channel: 'email', kind: 'update', summary: 'COMMS-SECRET the vendor said...' }, params: { id: S.rP } })).status, 201)
+    await withDrive(async () => {
+      const up = async (del: string, buf: Buffer, name: string, note?: string) => { const r = await call(H.proofs.POST, { as: TEAM, method: 'POST', form: form(buf, name, note ? { note } : {}), params: { id: del } }); assert.equal(r.status, 201, JSON.stringify(r.json)); return r.json.id as string }
+      S.pA = await up(S.rA, PNGB('a'), 'screenshot.png', 'PROOF-NOTE-SECRET'); S.pHid = await up(S.rA, PNGB('h'), 'hidden-internal.png'); S.pPdf = await up(S.rB, PDF('insights'), 'insights.pdf'); S.pArc = await up(S.rB, PNGB('z'), 'archived-proof.png')
+      const l = await call(H.proofs.POST, { as: TEAM, method: 'POST', body: { url: 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view', name: 'Insights link' }, params: { id: S.rB } }); assert.equal(l.status, 201); S.pLink = l.json.id
+    })
+  })
+
+  await step('L16: the brand-facing report has EXACTLY the allow-listed shape, shows NO proof until someone ticks it, and none of the planted secrets ever reach it', async () => {
+    const r = await preview(S.rP); assert.equal(r.status, 200, JSON.stringify(r.json).slice(0, 200)); const rep = r.json.report
+    assert.deepEqual(Object.keys(rep), REPORT_KEYS); assert.equal(r.json.safe_to_share, true); assert.equal(r.json.links_released, true)
+    assert.deepEqual(rep.deliverables.map((x: any) => [x.description, x.status, x.pct, x.proofs.length]), [['Perimeter boards', 'delivered', 100, 0], ['Social posts', 'partial', 75, 0], ['Hospitality', 'missed', 0, 0]], 'proof is hidden by DEFAULT')
+    assert.deepEqual(rep.delivery, { pct: 58.3, counted: 3, delivered: 1, partial: 1, planned: 0, missed: 1, replaced_excluded: 0 })
+    assert.deepEqual(rep.metrics.summary.map((m: any) => [m.label, m.value, m.readings]), [['Matches', 12, 2]], 'A\'s newer reading (8) replaces its older (3): 8 + 4')
+    const proofsList = async (del: string) => (await call(H.proofs.GET, { as: TEAM, params: { id: del } })).json
+    assert.ok((await proofsList(S.rA)).every((p: any) => p.report_visible === false), 'every proof starts hidden')
+    const tick = (del: string, proofId: string, v: unknown, as = TEAM) => call(H.proofById.PATCH, { as, method: 'PATCH', body: { report_visible: v }, params: { id: del, proofId } })
+    assert.equal((await tick(S.rA, S.pA, 'yes')).status, 400); assert.equal((await tick(S.rA, NIL, true)).status, 404); assert.equal((await tick(S.rA, 'nope', true)).status, 404); assert.equal((await tick(S.rB, S.pA, true)).status, 404, 'a proof cannot be ticked through another deliverable')
+    for (const [del, id] of [[S.rA, S.pA], [S.rB, S.pPdf], [S.rB, S.pLink], [S.rB, S.pArc]] as const) assert.equal((await tick(del, id, true)).status, 200)
+    assert.equal((await call(H.proofById.DELETE, { as: TEAM, method: 'DELETE', params: { id: S.rB, proofId: S.pArc } })).status, 200)
+    const after = (await preview(S.rP)).json.report; assert.deepEqual(after.deliverables.map((x: any) => x.proofs.map((p: any) => p.name)), [['screenshot.png'], ['insights.pdf', 'Insights link'], []], 'only ticked, un-archived proof; the hidden and the archived are absent')
+    assert.deepEqual(after.deliverables[1].proofs.map((p: any) => [p.kind, p.url]), [['upload', null], ['link', 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view']], 'a link keeps its URL; an upload never exposes one')
+    const blob = JSON.stringify(after); for (const sec of SECRETS2) assert.ok(!blob.includes(sec), `LEAKED: ${sec}`); const bad = keysOf(after).filter((k) => BADKEY.test(k)); assert.deepEqual(bad, [], 'no key that even sounds like money, vendors or notes')
+    assert.ok((await tick(S.rA, S.pA, true, AGENT_A)).status === 403)
+    assert.ok(await count('audit_events', { action: 'deliverable_proof_report_visibility' }) >= 4)
+  })
+
+  await step('L18: branding and cadence — Manager/CEO only; agent branding only for a deal that REALLY came through that agent; the agent\'s NAME only (D17)', async () => {
+    const g = await call(H.reportSettings.GET, { as: TEAM, params: { id: S.rP } }); assert.deepEqual([g.json.settings, g.json.route_agent], [{ branding: 'emergex', cadence: 'manual', title: null, agent_id: null }, null])
+    assert.equal((await putSettings(S.rP, { cadence: 'weekly' }, TEAM)).status, 403)
+    for (const bad of [{ branding: 'whitelabel' }, { cadence: 'hourly' }, { title: '   ' }, { title: 'x'.repeat(121) }]) assert.equal((await putSettings(S.rP, bad)).status, 400, JSON.stringify(bad))
+    const direct = await putSettings(S.rP, { branding: 'agent' }); assert.equal(direct.status, 400); assert.match(direct.json.error, /did not come through an agent/); assert.equal((await putSettings(S.rP, { branding: 'co_branded' })).status, 400)
+    assert.equal((await putSettings(S.rP, { cadence: 'weekly', title: 'Blitz — Gulf Premier League' })).json.settings.title, 'Blitz — Gulf Premier League'); assert.equal((await preview(S.rP)).json.report.title, 'Blitz — Gulf Premier League', 'the brand-facing title can differ from the internal project name')
+    assert.equal((await putSettings(S.rP, { cadence: 'manual', title: null })).json.settings.title, null)
+    const ad = await winDeal('team', 'report agent', S.rBlitzMer); S.rAgentP = ad.projectId
+    assert.equal((await call(H.reportSettings.GET, { as: TEAM, params: { id: S.rAgentP } })).json.route_agent.agent_name, 'Meridian Sports')
+    for (const mode of ['agent', 'co_branded']) { const r = await putSettings(S.rAgentP, { branding: mode }); assert.equal(r.status, 200, JSON.stringify(r.json)); assert.equal(r.json.settings.agent_id, S.agent); assert.deepEqual((await preview(S.rAgentP)).json.report.branding, { mode, agent_name: 'Meridian Sports' }) }
+    assert.deepEqual((await putSettings(S.rAgentP, { branding: 'emergex' })).json.settings, { branding: 'emergex', cadence: 'manual', title: null, agent_id: null }); assert.deepEqual((await preview(S.rAgentP)).json.report.branding, { mode: 'emergex', agent_name: null }, 'switching back drops the agent name entirely')
+    assert.equal((await call(H.reportSettings.GET, { as: TEAM, params: { id: NIL } })).status, 404); assert.equal((await call(H.reportSettings.GET, { as: TEAM, params: { id: 'nope' } })).status, 404); assert.ok(await count('audit_events', { action: 'report_settings_changed' }) >= 5)
+  })
+
+  await step('L19: a link\'s token is shown ONCE and never stored (only its hash); needs the release switch; refused while a forbidden name would show; bounded expiry; capped count', async () => {
+    delete process.env.REPORT_LINKS_ENABLED; try { const off = await mkLink(S.rP); assert.equal(off.status, 409); assert.match(off.json.error, /not been released/) } finally { process.env.REPORT_LINKS_ENABLED = '1' }
+    assert.equal((await mkLink(S.rP, {}, TEAM)).status, 403); assert.equal((await mkLink(NIL)).status, 404)
+    for (const bad of [{ expires_in_days: 0 }, { expires_in_days: 366 }, { expires_in_days: 1.5 }, { expires_in_days: '7' }, { label: '   ' }, { label: 'x'.repeat(121) }]) assert.equal((await mkLink(S.rP, bad)).status, 400, JSON.stringify(bad))
+    assert.equal(await count('report_links', { project_id: S.rP }), 0, 'every refused request created nothing')
+
+    await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { description: 'Apex perimeter boards' }, params: { id: S.rA } })
+    const pv = await preview(S.rP); assert.deepEqual([pv.json.safe_to_share, pv.json.leaks], [false, ['Apex']], 'the preview warns'); const blocked = await mkLink(S.rP); assert.equal(blocked.status, 409); assert.deepEqual(blocked.json.leaks, ['Apex']); assert.match(blocked.json.error, /must stay internal/)
+    await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { description: 'Perimeter boards' }, params: { id: S.rA } }); assert.equal((await preview(S.rP)).json.safe_to_share, true)
+
+    const r = await mkLink(S.rP, { label: 'Blitz marketing team' }); assert.equal(r.status, 201, JSON.stringify(r.json)); const token = r.json.token as string
+    assert.match(token, /^[A-Za-z0-9_-]{43}$/); assert.equal(r.json.url, `http://localhost/r/${token}`); assert.equal(r.res.headers.get('cache-control'), 'no-store'); assert.ok(Math.abs(Date.parse(r.json.expires_at) - (Date.now() + 30 * 86_400_000)) < 120_000, 'defaults to 30 days'); L1.id = r.json.id; L1.token = token
+    const row = (await svc.from('report_links').select('*').eq('id', r.json.id).single()).data!; assert.equal(row.token_hash, hashToken(token)); assert.equal(JSON.stringify(row).includes(token), false, 'the token is nowhere in the row')
+    assert.equal(JSON.stringify((await svc.from('audit_events').select('after, before').eq('action', 'report_link_created')).data).includes(token), false, 'nor in the audit log')
+    const list = await call(H.reportLinks.GET, { as: TEAM, params: { id: S.rP } }); assert.equal(list.status, 200); assert.deepEqual([list.json.links[0].state, list.json.links[0].label, list.json.links[0].created_by_name, list.json.links[0].views], ['active', 'Blitz marketing team', 'manager user', 0]); assert.equal(JSON.stringify(list.json).includes(token), false, 'the list can never reveal a token')
+    const ex = await mkLink(S.rP, { expires_in_days: 365 }); assert.equal(ex.status, 201); assert.ok(Date.parse(ex.json.expires_at) - Date.now() > 364 * 86_400_000)
+    const many: string[] = []; for (let i = 0; i < 18; i++) { const x = await mkLink(S.rP); assert.equal(x.status, 201); many.push(x.json.id) }
+    const over = await mkLink(S.rP); assert.equal(over.status, 409); assert.match(over.json.error, /20 active links/); for (const id of many) assert.equal((await call(H.reportRevoke.POST, { as: MANAGER, method: 'POST', params: { id: S.rP, linkId: id } })).status, 200)
+  })
+
+  await step('L19: the PUBLIC report — no login; identical to the staff preview; never cached, indexed, framed or referred; every view logged with a hashed (never raw) address', async () => {
+    const r = await pub(L1.token, { headers: { 'x-forwarded-for': '203.0.113.9, 10.0.0.1', 'user-agent': 'E2E-Browser/1.0' } }); assert.equal(r.status, 200, JSON.stringify(r.json).slice(0, 200))
+    assert.deepEqual(Object.keys(r.json), ['report', 'snapshot', 'snapshots', 'expires_at']); assert.equal(r.json.snapshot, null)
+    const staff = (await preview(S.rP)).json.report, norm = (x: any) => ({ ...x, generated_at: '' }); assert.deepEqual(norm(r.json.report), norm(staff), 'what the brand sees IS the staff preview')
+    const h = (k: string) => r.res.headers.get(k) ?? ''; assert.match(h('cache-control'), /no-store/); assert.match(h('x-robots-tag'), /noindex/); assert.equal(h('referrer-policy'), 'no-referrer'); assert.match(h('content-security-policy'), /frame-ancestors 'none'/); assert.equal(h('x-content-type-options'), 'nosniff')
+    const blob = JSON.stringify(r.json); for (const sec of SECRETS2) assert.ok(!blob.includes(sec), `LEAKED PUBLICLY: ${sec}`); assert.deepEqual(keysOf(r.json).filter((k) => BADKEY.test(k)), [])
+    const v = await viewsOf(L1.id); assert.equal(v.length, 1); assert.deepEqual([v[0].kind, v[0].user_agent], ['report', 'E2E-Browser/1.0']); assert.match(v[0].ip_hash!, /^[0-9a-f]{32}$/); assert.equal(JSON.stringify(v).includes('203.0.113'), false, 'the raw address is stored nowhere')
+    await pub(L1.token); assert.equal((await viewsOf(L1.id)).length, 2, 'every view'); assert.equal((await pub(L1.token, { as: AGENT_A })).status, 200, 'the link, not any session, is what grants access')
+    assert.equal((await call(H.reportLinks.GET, { as: TEAM, params: { id: S.rP } })).json.links.find((l: any) => l.id === L1.id).views, 3)
+  })
+
+  await step('L19/L21: EVERY failure looks exactly the same to an outsider — unknown, garbage, oversized, injected, expired, revoked, switched off, or a forbidden name appearing later', async () => {
+    const shape = async (token: string, o = {}) => { const x = await pub(token, o); return JSON.stringify({ status: x.status, body: x.json, cache: x.res.headers.get('cache-control'), robots: x.res.headers.get('x-robots-tag'), csp: x.res.headers.get('content-security-policy') }) }
+    const baseline = await shape(newToken()); assert.equal(JSON.parse(baseline).status, 404); assert.deepEqual(JSON.parse(baseline).body, GONE)
+    const viewsBefore = await count('report_views')
+    for (const bad of ['', 'short', 'a'.repeat(43) + '!', "' or 1=1 --" + 'a'.repeat(32), '../../etc/passwd', 'a'.repeat(5000), '%00'.repeat(20), L1.token.slice(0, 42), L1.token + 'x', L1.token.toLowerCase() === L1.token ? L1.token.toUpperCase() : L1.token.toLowerCase()]) assert.equal(await shape(bad), baseline, `garbage "${bad.slice(0, 20)}" must look like any unknown link`)
+    const exTok = newToken(); await svc.from('report_links').insert({ org_id: S.orgId, project_id: S.rP, token_hash: hashToken(exTok), expires_at: new Date(Date.now() + 1000).toISOString() }); assert.equal((await pub(exTok)).status, 200, 'valid at first'); await new Promise((r) => setTimeout(r, 1400)); assert.equal(await shape(exTok), baseline, 'EXPIRED')
+    const rv = await mkLink(S.rP); assert.equal((await pub(rv.json.token)).status, 200); assert.equal((await call(H.reportRevoke.POST, { as: MANAGER, method: 'POST', params: { id: S.rP, linkId: rv.json.id } })).status, 200); assert.equal(await shape(rv.json.token), baseline, 'REVOKED — and immediately')
+    delete process.env.REPORT_LINKS_ENABLED; try { assert.equal(await shape(L1.token), baseline, 'SWITCHED OFF') } finally { process.env.REPORT_LINKS_ENABLED = '1' }
+    assert.equal((await pub(L1.token)).status, 200, 'and back on')
+    const auditBefore = await count('audit_events', { action: 'report_blocked_forbidden_name' })
+    await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { description: 'Apex perimeter boards' }, params: { id: S.rA } })
+    assert.equal(await shape(L1.token), baseline, 'a forbidden name appeared AFTER the link was issued: nothing is shown'); assert.equal(await count('audit_events', { action: 'report_blocked_forbidden_name' }), auditBefore + 1, 'and staff are told (audit)')
+    await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { description: 'Perimeter boards' }, params: { id: S.rA } }); assert.equal((await pub(L1.token)).status, 200, 'fixed: back to normal')
+    assert.equal(await count('report_views'), viewsBefore + 1 /* exTok first view */ + 1 /* rv first view */ + 1 /* back on */ + 1 /* fixed */, 'failures log nothing; only successful views are logged')
+    const fakeHit = { link: { id: NIL, org_id: S.orgId, project_id: S.rP, expires_at: '' }, project: { id: S.rP, name: 'x', deal_id: NIL, status: 'active' } }
+    assert.equal(await logView(fakeHit as never, new (await import('next/server')).NextRequest('http://localhost/x'), { kind: 'report' }), false, 'if a view cannot be logged, logView says so — and the routes then serve NOTHING')
+  })
+
+  await step('L16/L19: proof files — only ticked, un-archived UPLOADS of THIS project, re-checked on every request; images inline, everything else as a download; each served file logged', async () => {
+    await withDrive(async () => {
+      const px = (id: string, token = L1.token) => call(H.pubProof.GET, { params: { token, proofId: id } }); const before = (await viewsOf(L1.id)).filter((v) => v.kind === 'proof').length
+      const img = await px(S.pA); assert.equal(img.status, 200); assert.equal(img.res.headers.get('content-type'), 'image/png'); assert.match(img.res.headers.get('content-disposition') ?? '', /^inline; filename="screenshot\.png"$/); assert.ok(Buffer.from(await img.res.arrayBuffer()).equals(PNGB('a')), 'byte-for-byte'); assert.equal(img.res.headers.get('x-content-type-options'), 'nosniff'); assert.match(img.res.headers.get('cache-control') ?? '', /no-store/)
+      const pdf = await px(S.pPdf); assert.equal(pdf.status, 200); assert.equal(pdf.res.headers.get('content-type'), 'application/octet-stream', 'a PDF is never rendered in our page'); assert.match(pdf.res.headers.get('content-disposition') ?? '', /^attachment/)
+      const gone = JSON.stringify(GONE); for (const [what, id] of [['hidden', S.pHid], ['archived', S.pArc], ['a LINK proof', S.pLink], ['unknown', NIL], ['malformed', 'nope'], ['SQL', "x' or '1'='1"]] as const) { const x = await px(id); assert.equal(x.status, 404, what); assert.equal(JSON.stringify(x.json), gone, what) }
+      const d1 = (await call(H.proofs.GET, { as: TEAM, params: { id: S.D1 } })).json[0]; assert.equal((await call(H.proofById.PATCH, { as: TEAM, method: 'PATCH', body: { report_visible: true }, params: { id: S.D1, proofId: d1.id } })).status, 200)
+      assert.equal((await px(d1.id)).status, 404, 'a TICKED proof of a DIFFERENT project is not reachable through this link'); await call(H.proofById.PATCH, { as: TEAM, method: 'PATCH', body: { report_visible: false }, params: { id: S.D1, proofId: d1.id } })
+      const viewed = (await viewsOf(L1.id)).filter((v) => v.kind === 'proof'); assert.equal(viewed.length - before, 2, 'exactly the two files that were served are logged'); assert.deepEqual(viewed.slice(-2).map((v) => v.proof_id), [S.pA, S.pPdf])
+      assert.equal((await call(H.proofById.PATCH, { as: TEAM, method: 'PATCH', body: { report_visible: false }, params: { id: S.rA, proofId: S.pA } })).status, 200); assert.equal((await px(S.pA)).status, 404, 'un-ticking takes effect on the very next request')
+      assert.equal((await call(H.proofById.PATCH, { as: TEAM, method: 'PATCH', body: { report_visible: true }, params: { id: S.rA, proofId: S.pA } })).status, 200); assert.equal((await px(S.pA)).status, 200)
+    })
+  })
+
+  await step('L17: snapshots are FROZEN; the live view moves on; a snapshot of another project, or one that held a forbidden name, is never shown', async () => {
+    const take = (pid: string, as = TEAM) => call(H.reportSnaps.POST, { as, method: 'POST', body: {}, params: { id: pid } })
+    const snap = await take(S.rP); assert.equal(snap.status, 201, JSON.stringify(snap.json)); assert.equal(snap.json.blocked, false); S.snap1 = snap.json.id
+    const list = (await call(H.reportSnaps.GET, { as: TEAM, params: { id: S.rP } })).json; assert.deepEqual([list[0].id, list[0].trigger, list[0].blocked, list[0].taken_by_name], [S.snap1, 'manual', false, 'team user'])
+    const got = await call(H.reportSnap.GET, { as: TEAM, params: { id: S.rP, sid: S.snap1 } }); assert.deepEqual(Object.keys(got.json.content).sort(), [...REPORT_KEYS].sort(), 'same keys (Postgres jsonb re-orders them)'); assert.equal(got.json.content.delivery.pct, 58.3)
+    assert.ok((await svc.from('report_snapshots').update({ content: { hacked: 1 } }).eq('id', S.snap1)).error, 'the DATABASE refuses an edit'); assert.ok((await svc.from('report_snapshots').delete().eq('id', S.snap1)).error)
+    assert.equal((await call(H.deliverableById.PATCH, { as: TEAM, method: 'PATCH', body: { delivered_quantity: 8 }, params: { id: S.rB } })).status, 200)
+    assert.equal((await pub(L1.token)).json.report.delivery.pct, 66.7, 'the live view moved on (100 + 100 + 0) ÷ 3'); const frozen = await pub(L1.token, { query: `?snapshot=${S.snap1}` }); assert.equal(frozen.status, 200); assert.equal(frozen.json.report.delivery.pct, 58.3, 'the snapshot did not'); assert.deepEqual(frozen.json.snapshot, { id: S.snap1, taken_on: new Date().toISOString().slice(0, 10), trigger: 'manual' })
+    assert.ok((await pub(L1.token)).json.snapshots.some((x: any) => x.id === S.snap1), 'the live view lists the snapshots'); assert.ok((await viewsOf(L1.id)).some((v) => v.kind === 'snapshot' && v.snapshot_id === S.snap1))
+    const other = await take(S.pFull); for (const q of [`?snapshot=${other.json.id}`, `?snapshot=${NIL}`, '?snapshot=nope', "?snapshot=x' or '1'='1"]) assert.equal((await pub(L1.token, { query: q })).status, 404, q)
+    await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { description: 'Apex perimeter boards' }, params: { id: S.rA } }); const bad = await take(S.rP); assert.equal(bad.status, 201); assert.equal(bad.json.blocked, true); assert.deepEqual(bad.json.leaks, ['Apex'])
+    await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { description: 'Perimeter boards' }, params: { id: S.rA } })
+    assert.equal((await pub(L1.token, { query: `?snapshot=${bad.json.id}` })).status, 404, 'a snapshot that held a forbidden name is NEVER shown, even after the wording was fixed'); assert.ok(!(await pub(L1.token)).json.snapshots.some((x: any) => x.id === bad.json.id)); assert.equal((await call(H.reportSnaps.GET, { as: TEAM, params: { id: S.rP } })).json.find((x: any) => x.id === bad.json.id).blocked, true)
+    assert.equal((await pub(L1.token, { query: `?snapshot=${S.snap1}` })).status, 200, 'while the clean one still is'); S.snapBad = bad.json.id
+  })
+
+  await step('L17: the daily job — authenticated ONLY by the secret, takes what is due once, skips closed projects, and is safe to run twice', async () => {
+    const run = (auth?: string) => call(H.cron.GET, { headers: auth ? { authorization: auth } : {} })
+    assert.equal((await run()).status, 401); assert.equal((await run('Bearer wrong')).status, 401); assert.equal((await run('Bearer')).status, 401); assert.equal((await run(`Basic ${process.env.CRON_SECRET}`)).status, 401); assert.equal((await run(process.env.CRON_SECRET)).status, 401, 'the "Bearer " prefix is required')
+    const saved = process.env.CRON_SECRET; process.env.CRON_SECRET = 'short'; try { assert.equal((await run('Bearer short')).status, 401, 'a weak secret is refused even when it matches') } finally { process.env.CRON_SECRET = saved }
+    delete process.env.CRON_SECRET; try { assert.equal((await run('Bearer ')).status, 401); assert.equal((await run('Bearer undefined')).status, 401, 'no secret configured = the job is off') } finally { process.env.CRON_SECRET = saved }
+    assert.equal(await count('report_snapshots', { trigger: 'cadence' }), 0)
+    assert.equal((await putSettings(S.rP, { cadence: 'daily' })).status, 200); assert.equal((await putSettings(S.lockP, { cadence: 'daily' })).status, 200, 'set on a CLOSED project too, to prove it is skipped')
+    const r1 = await run(`Bearer ${process.env.CRON_SECRET}`); assert.equal(r1.status, 200, JSON.stringify(r1.json)); assert.deepEqual([r1.json.taken, r1.json.blocked, r1.json.errors], [1, 0, 0], 'one snapshot, for the active project only'); assert.equal(r1.json.date, new Date().toISOString().slice(0, 10))
+    const row = (await svc.from('report_snapshots').select('trigger, taken_by, period_date, project_id').eq('trigger', 'cadence')).data!; assert.deepEqual([row.length, row[0].project_id, row[0].taken_by], [1, S.rP, null])
+    const r2 = await run(`Bearer ${process.env.CRON_SECRET}`); assert.deepEqual([r2.json.taken, r2.json.not_due], [0, 1], 'running it again the same day takes nothing'); assert.equal(await count('report_snapshots', { trigger: 'cadence' }), 1)
+    assert.equal((await putSettings(S.rP, { cadence: 'manual' })).status, 200); assert.equal((await putSettings(S.lockP, { cadence: 'manual' })).status, 200)
+  })
+
+  await step('L22: closing a project LOCKS IN its final report as a snapshot (once per day, even if closed twice); the closed project\'s link still shows that final report', async () => {
+    const d = await winDeal('team', 'final report'); const pid = d.projectId; const close = await closeIt(pid, ACK); assert.equal(close.status, 200, JSON.stringify(close.json)); assert.equal(close.json.final_report.blocked, false)
+    const snaps = (await svc.from('report_snapshots').select('id, trigger, taken_by').eq('project_id', pid)).data!; assert.deepEqual(snaps.map((x) => [x.id, x.trigger, x.taken_by]), [[close.json.final_report.id, 'closing', MANAGER]])
+    assert.equal((await reopenIt(pid, { reason: 'Brand sent late numbers' })).status, 200); const again = await closeIt(pid, ACK); assert.equal(again.json.final_report.id, close.json.final_report.id, 'idempotent for the day'); assert.equal(await count('report_snapshots', { project_id: pid, trigger: 'closing' }), 1)
+    const l = await mkLink(S.lockP); assert.equal(l.status, 201, JSON.stringify(l.json)); const v = await pub(l.json.token); assert.equal(v.status, 200); assert.ok(v.json.report.deliverables.some((x: any) => x.description === 'Lock posts'), 'a closed project\'s report is still available')
+    const lockProofs = (await call(H.proofs.GET, { as: TEAM, params: { id: S.lockDel } })).json; const t = await call(H.proofById.PATCH, { as: TEAM, method: 'PATCH', body: { report_visible: true }, params: { id: S.lockDel, proofId: lockProofs[0].id } }); assert.equal(t.status, 400); assert.match(t.json.error, /closed.*locked/i, 'on a closed project, what the brand may see is locked too')
+  })
+
+  await step('L20: PDF — staff or by link, for the live report or any snapshot; the same allow-list (no secret in the file); branding shows; a blocked snapshot or a revoked link gives nothing', async () => {
+    const staff = await call(H.reportPdf.GET, { as: TEAM, params: { id: S.rP } }); assert.equal(staff.status, 200); assert.equal(staff.res.headers.get('content-type'), 'application/pdf'); assert.match(staff.res.headers.get('content-disposition') ?? '', /^attachment; filename="[^"]+-report-\d{4}-\d{2}-\d{2}\.pdf"$/)
+    const bytes = new Uint8Array(await staff.res.arrayBuffer()); assert.equal(Buffer.from(bytes.slice(0, 5)).toString(), '%PDF-'); const text = pdfText(bytes)
+    for (const must of ['Prepared for', 'Perimeter boards', 'Social posts', 'Delivery 66.7%', 'screenshot.png', 'Matches: 12']) assert.ok(text.includes(must), `staff PDF missing: ${must}`); for (const sec of SECRETS2) assert.ok(!text.includes(sec), `LEAKED INTO THE PDF: ${sec}`)
+    const frozenPdf = pdfText(new Uint8Array(await (await call(H.reportPdf.GET, { as: TEAM, params: { id: S.rP }, query: `?snapshot=${S.snap1}` })).res.arrayBuffer())); assert.ok(frozenPdf.includes('Delivery 58.3%'), 'a snapshot PDF shows the figures AS THEY WERE')
+    assert.equal((await call(H.reportPdf.GET, { as: TEAM, params: { id: S.rP }, query: '?snapshot=nope' })).status, 404); assert.equal((await call(H.reportPdf.GET, { as: AGENT_A, params: { id: S.rP } })).status, 403)
+    const pp = (token: string, q = '') => call(H.pubPdf.GET, { params: { token }, query: q })
+    const pub1 = await pp(L1.token); assert.equal(pub1.status, 200); assert.equal(pub1.res.headers.get('content-type'), 'application/pdf'); const ptxt = pdfText(new Uint8Array(await pub1.res.arrayBuffer())); for (const sec of SECRETS2) assert.ok(!ptxt.includes(sec), `LEAKED INTO THE PUBLIC PDF: ${sec}`)
+    assert.equal((await pp(L1.token, `?snapshot=${S.snap1}`)).status, 200); assert.equal((await pp(L1.token, `?snapshot=${S.snapBad}`)).status, 404, 'a blocked snapshot gives no PDF'); assert.equal((await pp(L1.token, '?snapshot=nope')).status, 404); assert.equal((await pp('a'.repeat(43))).status, 404)
+    assert.deepEqual((await viewsOf(L1.id)).filter((v) => v.kind === 'pdf').map((v) => v.snapshot_id), [null, S.snap1], 'each PDF download is logged (and which snapshot)')
+    assert.ok(await count('audit_events', { action: 'report_pdf_exported' }) >= 2)
+    for (const mode of ['agent', 'co_branded', 'emergex']) { await putSettings(S.rAgentP, { branding: mode }); const t = pdfText(new Uint8Array(await (await call(H.reportPdf.GET, { as: TEAM, params: { id: S.rAgentP } })).res.arrayBuffer())); assert.equal(t.includes('Meridian Sports'), mode !== 'emergex', mode); assert.equal(t.includes('EmergeX'), mode !== 'agent', mode) }
+  })
+
+  await step('L19: the view log and revocation — anyone on staff can read the log; only Manager/CEO revoke; revoking is immediate, permanent, and a link of another project is untouchable', async () => {
+    const views = await call(H.reportViews.GET, { as: TEAM, params: { id: S.rP, linkId: L1.id } }); assert.equal(views.status, 200); assert.ok(views.json.length >= 8 && new Set(views.json.map((v: any) => v.kind)).size >= 4, 'report, snapshot, proof and pdf views are all there'); assert.ok(views.json.every((v: any) => !('raw_ip' in v) && !JSON.stringify(v).includes('203.0.113')))
+    assert.equal((await call(H.reportViews.GET, { as: TEAM, params: { id: S.pFull, linkId: L1.id } })).status, 404, 'a link is only visible through ITS OWN project'); assert.equal((await call(H.reportViews.GET, { as: TEAM, params: { id: S.rP, linkId: 'nope' } })).status, 404)
+    const rev = (pid: string, linkId: string, as = MANAGER) => call(H.reportRevoke.POST, { as, method: 'POST', params: { id: pid, linkId } })
+    assert.equal((await rev(S.rP, L1.id, TEAM)).status, 403); assert.equal((await rev(S.pFull, L1.id)).status, 404, 'cannot revoke through the wrong project'); assert.equal((await pub(L1.token)).status, 200, 'still alive after the refused attempts')
+    assert.equal((await rev(S.rP, L1.id)).status, 200); assert.equal((await pub(L1.token)).status, 404, 'the very next request'); assert.equal((await pub(L1.token, { query: `?snapshot=${S.snap1}` })).status, 404); assert.equal((await call(H.pubPdf.GET, { params: { token: L1.token } })).status, 404)
+    assert.equal((await rev(S.rP, L1.id)).status, 409, 'already revoked'); assert.equal((await rev(S.rP, NIL)).status, 404)
+    const l = (await call(H.reportLinks.GET, { as: TEAM, params: { id: S.rP } })).json.links.find((x: any) => x.id === L1.id); assert.deepEqual([l.state, !!l.revoked_at], ['revoked', true]); assert.ok(l.views >= 8, 'the log outlives the link')
+    assert.ok((await svc.from('report_links').update({ revoked_at: null, revoked_by: null }).eq('id', L1.id)).error, 'and the DATABASE will not un-revoke it'); assert.ok(await count('audit_events', { action: 'report_link_revoked' }) >= 20)
+  })
+
+  console.log('\nStage 3 — report alerts: links expiring, reports held back, snapshots overdue (L26/L27)')
+  const alertGroup = async (title: string, as = TEAM) => (await call(H.notifications.GET, { as })).json.find((g: any) => g.title === title)
+  const repCeo = async () => (await call(H.ceoView.GET, { as: CEO })).json.reports
+
+  await step('L27: a report link nearing its expiry is flagged for every staff role (severity rises as it nears), and clears when revoked; a long-lived link is not flagged', async () => {
+    assert.equal(await alertGroup('Report links expiring soon'), undefined, 'nothing is expiring yet')
+    const three = await mkLink(S.rP, { label: 'Three days', expires_in_days: 3 }), one = await mkLink(S.rP, { label: 'Tomorrow', expires_in_days: 1 }), long = await mkLink(S.rP, { label: 'A month', expires_in_days: 30 })
+    for (const r of [three, one, long]) assert.equal(r.status, 201)
+    for (const as of [TEAM, MANAGER, CEO]) { const g = await alertGroup('Report links expiring soon', as); assert.ok(g, 'every staff role sees it'); assert.deepEqual(g.items.map((i: any) => [i.detail, i.severity]), [['Tomorrow — 1 day left', 'warn'], ['Three days — 3 days left', 'info']], 'soonest first; the month-long link is not flagged'); assert.equal(g.items[0].link, `/projects/${S.rP}`) }
+    const ceo = await repCeo(); assert.equal(ceo.expiring_soon, 2); assert.ok(ceo.active_links >= 4)
+    assert.equal((await call(H.reportRevoke.POST, { as: MANAGER, method: 'POST', params: { id: S.rP, linkId: one.json.id } })).status, 200); assert.deepEqual((await alertGroup('Report links expiring soon')).items.map((i: any) => i.detail), ['Three days — 3 days left'], 'a revoked link is no longer flagged')
+    for (const r of [three, long]) await call(H.reportRevoke.POST, { as: MANAGER, method: 'POST', params: { id: S.rP, linkId: r.json.id } }); assert.equal(await alertGroup('Report links expiring soon'), undefined); assert.equal((await repCeo()).expiring_soon, 0)
+    assert.ok(!JSON.stringify((await call(H.notifications.GET, { as: TEAM })).json).includes('token'), 'and no alert can ever carry a token')
+  })
+
+  await step('L27: a project with a LIVE link whose report now contains an internal name is flagged URGENT as held back — and clears the moment the wording is fixed', async () => {
+    const link = await mkLink(S.rP, { label: 'Held back test' }); assert.equal(link.status, 201); assert.equal(await alertGroup('Reports held back'), undefined, 'a clean report is not held back')
+    await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { description: 'Apex perimeter boards' }, params: { id: S.rA } })
+    for (const as of [TEAM, MANAGER, CEO]) { const g = await alertGroup('Reports held back', as); assert.ok(g, 'every staff role sees it'); assert.equal(g.items.length, 1); assert.equal(g.items[0].severity, 'urgent'); assert.match(g.items[0].detail, /the brand currently sees nothing.*Apex/); assert.equal(g.items[0].link, `/projects/${S.rP}`) }
+    assert.deepEqual((await repCeo()).held_back, [{ project_id: S.rP, project: (await svc.from('projects').select('name').eq('id', S.rP).single()).data!.name, names: ['Apex'] }]); assert.equal((await pub(link.json.token)).status, 404, 'and indeed the brand sees nothing')
+    await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { description: 'Perimeter boards' }, params: { id: S.rA } }); assert.equal(await alertGroup('Reports held back'), undefined, 'fixed: cleared'); assert.deepEqual((await repCeo()).held_back, []); assert.equal((await pub(link.json.token)).status, 200)
+    await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { description: 'Apex perimeter boards' }, params: { id: S.rA } }); assert.ok(await alertGroup('Reports held back'), 'another live link on this project (the 365-day one from earlier) means it is STILL held back')
+    for (const l of (await call(H.reportLinks.GET, { as: TEAM, params: { id: S.rP } })).json.links.filter((x: any) => x.state === 'active')) assert.equal((await call(H.reportRevoke.POST, { as: MANAGER, method: 'POST', params: { id: S.rP, linkId: l.id } })).status, 200)
+    assert.equal(await alertGroup('Reports held back'), undefined, 'with NO live link at all there is nothing to hold back'); await call(H.deliverableById.PATCH, { as: MANAGER, method: 'PATCH', body: { description: 'Perimeter boards' }, params: { id: S.rA } })
+  })
+
+  await step('L27: a snapshot the daily job should have taken is flagged as overdue (days late), only once it is a full day late — and clears when the job catches up', async () => {
+    assert.equal(await alertGroup('Report snapshots overdue'), undefined)
+    assert.equal((await putSettings(S.rAgentP, { cadence: 'daily' })).status, 200); assert.equal(await alertGroup('Report snapshots overdue'), undefined, 'daily, never snapshotted: due today, not late')
+    const ins = await svc.from('report_snapshots').insert({ org_id: S.orgId, project_id: S.rAgentP, trigger: 'cadence', period_date: isoDay(-1), content: {}, content_hash: 'x' }); assert.equal(ins.error, null)
+    assert.equal(await alertGroup('Report snapshots overdue'), undefined, 'last taken yesterday: due today, not yet late')
+    const old = await svc.from('report_snapshots').insert({ org_id: S.orgId, project_id: S.rAgentP, trigger: 'cadence', period_date: isoDay(0), content: {}, content_hash: 'y' }); assert.equal(old.error, null)
+    assert.equal(await alertGroup('Report snapshots overdue'), undefined, 'taken today: nothing to do')
+    // a different project, last snapshot 4 days ago => due 3 days ago => 3 days late
+    assert.equal((await putSettings(S.pThird, { cadence: 'daily' })).status, 200); assert.equal((await svc.from('report_snapshots').insert({ org_id: S.orgId, project_id: S.pThird, trigger: 'cadence', period_date: isoDay(-4), content: {}, content_hash: 'z' })).error, null)
+    for (const as of [TEAM, MANAGER, CEO]) { const g = await alertGroup('Report snapshots overdue', as); assert.ok(g, 'every staff role sees it'); assert.equal(g.items.length, 1); assert.match(g.items[0].detail, /^Every day snapshot is 3 days late/); assert.equal(g.items[0].severity, 'warn'); assert.equal(g.items[0].link, `/projects/${S.pThird}`) }
+    assert.equal((await repCeo()).snapshots_overdue, 1)
+    const run = await call(H.cron.GET, { headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } }); assert.equal(run.status, 200); assert.ok(run.json.taken >= 1); assert.equal(await alertGroup('Report snapshots overdue'), undefined, 'the job caught up: cleared'); assert.equal((await repCeo()).snapshots_overdue, 0)
+    assert.equal((await putSettings(S.pThird, { cadence: 'manual' })).status, 200); assert.equal((await putSettings(S.rAgentP, { cadence: 'manual' })).status, 200)
   })
 
   await step('/api/health reports every migration present and no critical env missing', async () => {
