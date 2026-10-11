@@ -477,5 +477,6 @@ Every Won deal now becomes a **project** with a checklist, parties, a communicat
   usually a sign a permission is missing, not that the role needs special-casing.
 - `price_records.proposal_id`, `price_records.outcome`, and
   `shares.proposal_version_id` are already nullable FKs into the empty
+  Test line
   `proposals`/`proposal_versions` tables — Stage 2A should populate those,
   not add new columns.
