@@ -35,7 +35,7 @@ export async function requirePermission(profile: Profile, permissionKey: string)
 /** Universal audit log — every service-layer write calls this. */
 export async function writeAudit(params: {
   orgId: string
-  actorId: string
+  actorId: string | null   // null = a system event (e.g. a public report being blocked)
   action: string
   entityType: string
   entityId: string

@@ -1,6 +1,7 @@
 import { supabaseService } from './supabaseServer'
 import { listInvoices } from './finance'
 import { loadProjectHealth } from './projectHealth'
+import { loadReportAlerts } from './reportHealth'
 
 export interface NotificationItem { label: string; detail: string; link: string; severity: 'info' | 'warn' | 'urgent' }
 export interface NotificationGroup { title: string; items: NotificationItem[] }
@@ -74,6 +75,12 @@ export async function buildNotifications(orgId: string, opts: { finance: boolean
   if (alerts.dueSoon.length) groups.push({ title: 'Deliverables due this week', items: alerts.dueSoon.map((d) => ({ label: d.description, detail: `${d.project} · due ${d.due_date}`, link: `/projects/${d.project_id}`, severity: 'info' as const })) })
   if (alerts.proofMissing.length) groups.push({ title: 'Delivered without proof', items: alerts.proofMissing.map((d) => ({ label: d.description, detail: `${d.project} — attach proof`, link: `/projects/${d.project_id}`, severity: 'warn' as const })) })
   if (alerts.overdueSteps.length) groups.push({ title: 'Overdue project steps', items: alerts.overdueSteps.map((x) => ({ label: x.title, detail: `${x.project} · was due ${x.due_date}`, link: `/projects/${x.project_id}`, severity: 'warn' as const })) })
+
+  // L27: brand-report alerts. Nothing financial, so every staff role gets them.
+  const rep = await loadReportAlerts(orgId)
+  if (rep.heldBack.length) groups.push({ title: 'Reports held back', items: rep.heldBack.map((h) => ({ label: h.project, detail: `the brand currently sees nothing: the report contains an internal name (${h.names.join(', ')}) — reword it`, link: `/projects/${h.project_id}`, severity: 'urgent' as const })) })
+  if (rep.expiring.length) groups.push({ title: 'Report links expiring soon', items: rep.expiring.map((x) => ({ label: x.project, detail: `${x.label} — ${x.days_left === 0 ? 'expires today' : plural(x.days_left, 'day') + ' left'}`, link: `/projects/${x.project_id}`, severity: x.days_left <= 2 ? 'warn' as const : 'info' as const })) })
+  if (rep.overdue.length) groups.push({ title: 'Report snapshots overdue', items: rep.overdue.map((x) => ({ label: x.project, detail: `${x.cadence} snapshot is ${plural(x.days_late, 'day')} late — the daily job may not be running (check CRON_SECRET)`, link: `/projects/${x.project_id}`, severity: 'warn' as const })) })
 
   // Money notifications only for people who hold finance.manage — otherwise this feed would quietly
   // leak exactly what that permission (and the RLS on invoices) exists to keep from Team.

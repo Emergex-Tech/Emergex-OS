@@ -1,6 +1,7 @@
 import { supabaseService } from './supabaseServer'
 import { buildPipeline } from './pipeline'
 import { loadProjectHealth } from './projectHealth'
+import { loadReportAlerts } from './reportHealth'
 
 export interface SignoffLine {
   line_id: string; proposal_id: string; brand_name: string; item_name: string
@@ -59,6 +60,7 @@ export interface CeoViewSummary {
   brands_agents: { route_count_by_type: Record<string, number>; conflicts_pending: number; conflicts_overridden: number }
   pricing: { signoff_queue: SignoffLine[]; recent_vendor_rate_changes: { item_name: string; type: string; amount: number; currency: string; price_date: string }[] }
   projects: { active: number; avg_delivery_pct: number | null; gates_open: number; waiting_on_us: number; delivery_at_risk: { id: string; name: string; brand_name: string; owner_name: string | null; delivery_pct: number | null; reasons: { code: string; count: number; detail: string }[] }[] }
+  reports: { active_links: number; expiring_soon: number; held_back: { project_id: string; project: string; names: string[] }[]; snapshots_overdue: number }
   team: { recent_activity: { at: string; actor: string | null; action: string; entity_type: string }[]; pending_route_scores: number; pending_overrides: number; pending_share_overrides: number }
 }
 
@@ -102,6 +104,7 @@ export async function buildCeoViewSummary(orgId: string): Promise<CeoViewSummary
     pipelineByStage.set(p.stage, row)
   }
 
+  const reportAlerts = await loadReportAlerts(orgId)
   const health = await loadProjectHealth(orgId)
   const pcts = health.projects.map((p) => p.delivery_pct).filter((x): x is number => x != null)
   return {
@@ -110,6 +113,7 @@ export async function buildCeoViewSummary(orgId: string): Promise<CeoViewSummary
       gates_open: health.projects.filter((p) => p.gate === 'open').length, waiting_on_us: health.projects.reduce((n, p) => n + p.waiting_on_us, 0),
       delivery_at_risk: health.projects.filter((p) => p.at_risk).map((p) => ({ id: p.id, name: p.name, brand_name: p.brand_name, owner_name: p.owner_name, delivery_pct: p.delivery_pct, reasons: p.reasons }))
     },
+    reports: { active_links: reportAlerts.activeLinks, expiring_soon: reportAlerts.expiring.length, held_back: reportAlerts.heldBack, snapshots_overdue: reportAlerts.overdue.length },
     inventory: { total_value: totalValue, expiring_14d: expiring.count ?? 0, edge_count: edges.count ?? 0, stale_count: (staleProps.count ?? 0) + (staleItems.count ?? 0) },
     pipeline_by_stage: Array.from(pipelineByStage.entries()).map(([stage, v]) => ({ stage, ...v })),
     brands_agents: { route_count_by_type: routeCountByType, conflicts_pending: conflictsPending.count ?? 0, conflicts_overridden: conflictsOverridden.count ?? 0 },
