@@ -14,7 +14,8 @@ async function loadItem(orgId: string, projectId: string, itemId: string) {
   return data
 }
 
-export async function PATCH(req: NextRequest, { params }: { params: { id: string; itemId: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string; itemId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')
@@ -52,7 +53,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 }
 
 /** Archive (not delete) — and only a CUSTOM item. A template step that doesn't apply is marked N/A with a reason instead. */
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string; itemId: string } }) {
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string; itemId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')

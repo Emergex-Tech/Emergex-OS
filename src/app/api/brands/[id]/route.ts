@@ -5,7 +5,8 @@ import { supabaseService } from '@/lib/supabaseServer'
 import { errorResponse } from '@/lib/apiError'
 
 /** Assign a brand to a brand group (or clear it with null). This is what the same-group conflict check (A23) keys on. */
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')

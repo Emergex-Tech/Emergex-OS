@@ -6,7 +6,8 @@ import { loadReportProject } from '@/lib/reportAdmin'
 import { takeSnapshot } from '@/lib/reportService'
 import { errorResponse } from '@/lib/apiError'
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const project = await loadReportProject(profile.org_id, params.id)
@@ -16,7 +17,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
 }
 
 /** "Save a snapshot now": the report as it stands, frozen. */
-export async function POST(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')

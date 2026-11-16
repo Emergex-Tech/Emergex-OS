@@ -7,7 +7,8 @@ import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
 /** Archive a party (kept for the history of the log; it just stops being listed as current). */
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string; partyId: string } }) {
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string; partyId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')

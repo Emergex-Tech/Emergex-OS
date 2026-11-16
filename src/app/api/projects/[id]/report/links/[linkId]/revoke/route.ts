@@ -7,7 +7,8 @@ import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
 /** Takes effect on the very next request: the public routes look the link up every time. Cannot be undone — create a new link instead. */
-export async function POST(_req: NextRequest, { params }: { params: { id: string; linkId: string } }) {
+export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: string; linkId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.manage')

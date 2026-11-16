@@ -9,7 +9,8 @@ import { errorResponse } from '@/lib/apiError'
 const SIDE_FOR_ROLE: Record<string, string> = { brand: 'brand', brand_route: 'brand', emergex_owner: 'emergex', delivery_agent: 'delivery', vendor: 'delivery', talent: 'delivery' }
 
 /** L28: add a party to the chain. The side follows from the role (brand / delivery / EmergeX), except for 'other'. */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')

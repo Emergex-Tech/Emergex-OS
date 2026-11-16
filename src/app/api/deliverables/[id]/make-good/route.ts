@@ -11,7 +11,8 @@ import { errorResponse } from '@/lib/apiError'
  * then marks the original 'replaced' — the original then drops out of the delivery % and the make-good counts instead.
  * A deliverable is either made good OR flagged for an invoice adjustment, not both.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.manage')

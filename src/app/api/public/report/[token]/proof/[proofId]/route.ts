@@ -13,7 +13,8 @@ const INLINE = new Set(['image/png', 'image/jpeg'])
  * An uploaded proof file, served ONLY if: the link is active, the proof belongs to THIS link's project, someone ticked "show to the
  * brand", it is not archived, and it is an uploaded file. Re-checked on every request, so hiding or archiving a proof takes effect at once.
  */
-export async function GET(req: NextRequest, { params }: { params: { token: string; proofId: string } }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ token: string; proofId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const hit = await resolveLink(params.token); if (!hit || !isUuid(params.proofId)) return notFound()
     const svc = supabaseService()

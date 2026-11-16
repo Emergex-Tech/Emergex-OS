@@ -7,7 +7,8 @@ import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
 /** Edit or retire a template step. Retire (active:false) rather than delete: projects already created keep their copy either way. */
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.template.manage')

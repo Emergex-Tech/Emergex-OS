@@ -6,7 +6,8 @@ import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
 /** L2: make this project an upsell of an ORIGINAL project (or detach it with null). The database refuses loops and chains. */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.manage')

@@ -13,7 +13,8 @@ import { errorResponse } from '@/lib/apiError'
  * approval chain). Applying it to the line changes the brand-facing price, so that
  * additionally needs margin.set, and is checked BEFORE anything is written.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string; lineId: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string; lineId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const body = await req.json()

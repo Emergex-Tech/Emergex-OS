@@ -15,7 +15,8 @@ async function loadProject(orgId: string, id: string): Promise<ProjectRef & { st
   return data
 }
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const project = await loadProject(profile.org_id, params.id)
@@ -26,7 +27,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
 }
 
 /** L23: draft from the records. Only for a CLOSED project. Redrafting overwrites the team's edits, so it needs {confirm_overwrite:true}. */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')
@@ -50,7 +52,8 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 }
 
 /** Edit the NAMED text. The anonymised copy is re-derived, and ANY edit takes an approved study back to draft (it must be approved again). */
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')

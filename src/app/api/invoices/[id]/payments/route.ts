@@ -7,7 +7,8 @@ import { toCents, isValidIsoDate } from '@/lib/billing'
 import { errorResponse } from '@/lib/apiError'
 
 /** B9. The friendly checks below are only for good error messages — the database trigger is the real guarantee. */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'finance.manage')

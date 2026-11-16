@@ -6,7 +6,8 @@ import { listInvoices, today } from '@/lib/finance'
 import { isValidIsoDate } from '@/lib/billing'
 import { errorResponse } from '@/lib/apiError'
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'finance.manage')
@@ -24,7 +25,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
 }
 
 /** { action: 'issue', due_date? } or { action: 'void' }. A void invoice is final; one with payments can't be voided (the database also refuses). */
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'finance.manage')

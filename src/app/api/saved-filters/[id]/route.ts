@@ -6,7 +6,8 @@ import { parseCriteria } from '@/lib/benchmarks'
 import { cleanName, loadOwned, isUniqueViolation, plainObject } from '@/lib/workspace'
 import { errorResponse } from '@/lib/apiError'
 
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')
@@ -24,7 +25,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   } catch (err) { return errorResponse(err) }
 }
 
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')

@@ -9,7 +9,8 @@ import { errorResponse } from '@/lib/apiError'
  * L10: flag a MISSED deliverable so the invoice gets adjusted for it ({flag:true, note}), or clear the flag ({flag:false}).
  * This only RECORDS the intent — it does not touch any invoice (that stays a deliberate finance action).
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.manage')

@@ -6,7 +6,8 @@ import { GATE_RULES } from '@/lib/projects'
 import { errorResponse } from '@/lib/apiError'
 
 /** Add a step to a template. It applies to projects created FROM NOW ON — live projects keep the copy they were given. */
-export async function POST(req: NextRequest, { params }: { params: { key: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ key: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.template.manage')

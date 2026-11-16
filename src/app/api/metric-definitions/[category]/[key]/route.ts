@@ -5,7 +5,8 @@ import { supabaseService } from '@/lib/supabaseServer'
 import { errorResponse } from '@/lib/apiError'
 
 /** Rename, re-order or retire a metric. Retire (active:false) rather than delete: recorded entries keep their metric. */
-export async function PATCH(req: NextRequest, { params }: { params: { category: string; key: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ category: string; key: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.template.manage')

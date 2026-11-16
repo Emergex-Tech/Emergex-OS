@@ -8,10 +8,11 @@ import { isValidIsoDate } from '@/lib/billing'
 import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
-const SELECT = 'id, deliverable_id, category_key, metric_key, value, recorded_on, source, source_ref, created_at, voided_at, void_reason, recorder:profiles!project_metrics_recorded_by_fkey(full_name), deliverable:deliverables(description)'
+const SELECT = 'id, deliverable_id, category_key, metric_key, segment, value, recorded_on, source, source_ref, created_at, voided_at, void_reason, recorder:profiles!project_metrics_recorded_by_fkey(full_name), deliverable:deliverables(description)'
 
 /** The metric sets that apply to this project, the entries recorded, and the headline figures (latest reading per deliverable; counts summed, rates averaged). */
-export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const project = await loadOwnProject(profile.org_id, params.id)
@@ -27,7 +28,8 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 }
 
 /** L14: record a reading. category_key may be omitted when the metric key is unambiguous for this project. */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.create')
@@ -47,6 +49,8 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     const source = typeof b.source === 'string' ? b.source.trim() : ''
     if (!source || source.length > 200) throw new ApiError(400, 'Say where the figure came from (1–200 characters)')
     if (b.source_ref != null && (typeof b.source_ref !== 'string' || b.source_ref.length > 500)) throw new ApiError(400, 'source_ref can be at most 500 characters')
+    const segment = typeof b.segment === 'string' ? b.segment.trim() : ''
+    if (b.segment != null && (typeof b.segment !== 'string' || segment.length < 1 || segment.length > 60)) throw new ApiError(400, 'segment must be 1–60 characters (e.g. a region or an ad type)')
     const svc = supabaseService()
     if (b.deliverable_id != null) {
       if (!isUuid(b.deliverable_id)) throw new ApiError(400, 'deliverable_id is not valid')
@@ -56,7 +60,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     }
     const { data, error } = await svc.from('project_metrics').insert({
       org_id: profile.org_id, project_id: project.id, deliverable_id: b.deliverable_id ?? null, category_key: def.category_key, metric_key: def.key, value: v.value,
-      recorded_on: on, source, source_ref: b.source_ref ?? null, recorded_by: profile.id
+      recorded_on: on, source, source_ref: b.source_ref ?? null, segment: segment || null, recorded_by: profile.id
     }).select(SELECT).single()
     if (error) throw new ApiError(400, error.message)
     await writeAudit({ orgId: profile.org_id, actorId: profile.id, action: 'project_metric_recorded', entityType: 'project', entityId: project.id, after: { entry_id: data.id, metric: def.key, value: v.value } })

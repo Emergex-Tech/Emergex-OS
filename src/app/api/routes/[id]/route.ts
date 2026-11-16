@@ -6,7 +6,8 @@ import { errorResponse } from '@/lib/apiError'
 
 const VALID_METHODS = ['onTop', 'outOf', 'fixedFee', 'none']
 
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const body = await req.json()

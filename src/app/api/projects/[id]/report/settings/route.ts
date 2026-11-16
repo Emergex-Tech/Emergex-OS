@@ -7,7 +7,8 @@ import { loadSettings, routeAgent } from '@/lib/reportService'
 import { CADENCES } from '@/lib/reportCadence'
 import { errorResponse } from '@/lib/apiError'
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const project = await loadReportProject(profile.org_id, params.id)
@@ -16,7 +17,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
 }
 
 /** Branding and cadence face the brand, so Manager/CEO set them. Agent or co-branded is only possible when the deal really came through that agent (D17: the agent's NAME only). */
-export async function PUT(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.manage')

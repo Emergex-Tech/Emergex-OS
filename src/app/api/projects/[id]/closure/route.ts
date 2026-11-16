@@ -7,7 +7,8 @@ import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
 /** What would still be open if this project were closed now. Read-only: the same list the close action records. */
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     if (!isUuid(params.id)) throw new ApiError(404, 'Project not found')

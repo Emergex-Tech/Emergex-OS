@@ -13,7 +13,8 @@ import { errorResponse } from '@/lib/apiError'
  * acknowledgement and a written reason, and the list of what was open is stored on the project. The renewal proposal is
  * created first (one per project, safe to repeat), then the project is closed — which locks its delivery record in the database.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.manage')

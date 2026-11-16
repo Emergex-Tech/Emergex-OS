@@ -9,7 +9,8 @@ import { errorResponse } from '@/lib/apiError'
 const STAGES = ['Draft', 'Review', 'Approved', 'Sent', 'Negotiating', 'Won', 'Lost']
 const GATED_STAGES = ['Approved', 'Sent'] // PRD 4/6.14: Manager "approves sending" — both need proposal.approve_send
 
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const body = await req.json()

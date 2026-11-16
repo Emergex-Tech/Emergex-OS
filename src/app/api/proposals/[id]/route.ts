@@ -5,7 +5,8 @@ import { supabaseService } from '@/lib/supabaseServer'
 import { computeWarnings, getPricingContext, getOtherBrandPrices, type PricingMechanic } from '@/lib/pricing'
 import { errorResponse } from '@/lib/apiError'
 
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
+export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const svc = supabaseService()

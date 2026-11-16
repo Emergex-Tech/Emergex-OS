@@ -7,7 +7,8 @@ import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
 /** Close an open request. The one change the log permits (the database refuses every other edit). Happens once. */
-export async function POST(req: NextRequest, { params }: { params: { id: string; cid: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string; cid: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')

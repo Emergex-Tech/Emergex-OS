@@ -5,7 +5,8 @@ import { checkConflicts, overrideState } from '@/lib/conflicts'
 import { errorResponse } from '@/lib/apiError'
 
 /** Per-line conflict check for a proposal, plus where any override request for that line stands. Read-only. */
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const svc = supabaseService()

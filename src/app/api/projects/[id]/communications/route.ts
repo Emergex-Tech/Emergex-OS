@@ -11,7 +11,8 @@ import { errorResponse } from '@/lib/apiError'
 const SELECT = 'id, party_id, direction, channel, kind, occurred_at, summary, related_type, related_id, status, waiting_on, resolved_at, resolution_note, created_at, creator:profiles!project_communications_created_by_fkey(full_name), party:project_parties(name, role)'
 
 /** L29: the log (newest first) and who is waiting on whom. */
-export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const project = await loadOwnProject(profile.org_id, params.id)
@@ -30,7 +31,8 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
   } catch (err) { return errorResponse(err) }
 }
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.create')

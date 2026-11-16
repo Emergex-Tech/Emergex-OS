@@ -6,7 +6,8 @@ import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
 /** The view log for one link: when, what kind, and a per-link hash of the viewer (never the address). */
-export async function GET(_req: NextRequest, { params }: { params: { id: string; linkId: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string; linkId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const project = await loadReportProject(profile.org_id, params.id)

@@ -16,7 +16,8 @@ const MAX_ENTRIES = 200
  * invalid NOTHING is saved (and the bad ones are listed), so an import is never half-done. Exact duplicates — of the log, or within
  * the batch — are skipped. Entries are marked source=chat_import and, like all log entries, can never be edited afterwards.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.create')

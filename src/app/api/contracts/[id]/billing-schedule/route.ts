@@ -6,7 +6,8 @@ import { buildSchedule, toCents, fromCents, invoiceNumber } from '@/lib/billing'
 import { errorResponse } from '@/lib/apiError'
 
 /** B6 + B7: turn a contract into a billing schedule — draft receivable invoices that sum to exactly the contract total. */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'finance.manage')

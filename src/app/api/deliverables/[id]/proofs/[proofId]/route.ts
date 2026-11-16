@@ -18,7 +18,8 @@ async function loadProof(orgId: string, deliverableId: string, proofId: string) 
 }
 
 /** Streams an UPLOADED proof through the service account, forced to download (never rendered in-page). A link is opened in Drive by the person's own Google access. */
-export async function GET(_req: NextRequest, { params }: { params: { id: string; proofId: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string; proofId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const p = await loadProof(profile.org_id, params.id, params.proofId)
@@ -32,7 +33,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string;
 }
 
 /** Archive, never delete — the file stays in Drive and the row stays for the audit trail. */
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string; proofId: string } }) {
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string; proofId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')
@@ -46,7 +48,8 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
 export const dynamic = 'force-dynamic'
 
 /** Tick / untick "show to the brand in reports". Proof is hidden from reports until someone ticks it. */
-export async function PATCH(req: NextRequest, { params }: { params: { id: string; proofId: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string; proofId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')

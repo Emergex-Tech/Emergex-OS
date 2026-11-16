@@ -10,7 +10,8 @@ import { errorResponse } from '@/lib/apiError'
  * L30, step 1 of 2. Reads a pasted WhatsApp/Telegram export and SHOWS what it found — it saves NOTHING. A person maps each sender
  * to a party and a side, adjusts what each message is, and only then confirms. Messages already in the log are flagged as duplicates.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.create')

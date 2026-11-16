@@ -9,7 +9,8 @@ import { errorResponse } from '@/lib/apiError'
 const MAX_ITEMS = 200
 
 /** Add items to YOUR shortlist. Idempotent: an item already on it is reported, not duplicated. */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')

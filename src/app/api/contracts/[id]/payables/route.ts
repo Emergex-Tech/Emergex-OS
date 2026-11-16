@@ -9,7 +9,8 @@ import { errorResponse } from '@/lib/apiError'
  * B8: payables to vendors and agents, derived from what the won deal actually cost. This reads
  * cost and agent-cut figures (margin-side data), so it needs margin.view as well as finance.manage.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'finance.manage')

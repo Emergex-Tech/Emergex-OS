@@ -4,7 +4,8 @@ import { supabaseService } from '@/lib/supabaseServer'
 import { errorResponse } from '@/lib/apiError'
 
 /** A5: "Already shared with this brand" — everything that has reached this brand, via any route, newest first. */
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const svc = supabaseService()

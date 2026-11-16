@@ -4,7 +4,7 @@ import { requirePermission, writeAudit, ensureFolderId } from '@/lib/serviceLaye
 import { supabaseService } from '@/lib/supabaseServer'
 import { driveImpl } from '@/lib/googleDrive'
 import { validateUpload, sha256Hex, driveFileName, MAX_CONTRACT_FILE_BYTES } from '@/lib/contractFiles'
-import { parseDriveLink } from '@/lib/metrics'
+import { parseProofLink, PLATFORM_LABEL } from '@/lib/proofLinks'
 import { safeFilePart } from '@/lib/naming'
 import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
@@ -12,7 +12,7 @@ import { errorResponse } from '@/lib/apiError'
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
-const SELECT = 'id, kind, name, url, mime_type, size_bytes, note, created_at, report_visible, adder:profiles!deliverable_proofs_added_by_fkey(full_name)'
+const SELECT = 'id, kind, name, url, platform, event_id, mime_type, size_bytes, note, created_at, report_visible, adder:profiles!deliverable_proofs_added_by_fkey(full_name)'
 const shape = (p: Record<string, unknown>) => ({ ...p, added_by_name: (p.adder as { full_name: string } | null)?.full_name ?? null, adder: undefined })
 
 async function loadDeliverable(orgId: string, id: string) {
@@ -24,7 +24,8 @@ async function loadDeliverable(orgId: string, id: string) {
   return { ...data, project }
 }
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const d = await loadDeliverable(profile.org_id, params.id)
@@ -38,7 +39,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
  * L11: attach proof — a FILE (sent as a form upload; stored in the project's Drive folder) or a LINK to an existing Drive file (sent as JSON {url}).
  * Like a contract file, an upload exists nowhere else: if Drive can't take it the request is refused and NOTHING is recorded.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')
@@ -50,10 +52,11 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
 
     if (!isUpload) {
       const b = await req.json().catch(() => ({}))
-      const link = parseDriveLink(b.url)
+      const link = parseProofLink(b.url)
       if (!link.ok) throw new ApiError(400, link.reason)
-      const name = typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 200) : 'Drive file'
-      const { data, error } = await svc.from('deliverable_proofs').insert({ org_id: profile.org_id, deliverable_id: d.id, kind: 'link', name, url: link.url, drive_file_id: null, note: typeof b.note === 'string' ? b.note.trim().slice(0, 500) || null : null, added_by: profile.id }).select(SELECT).single()
+      if (b.event_id != null && !isUuid(b.event_id)) throw new ApiError(400, 'event_id is not valid')
+      const name = typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 200) : link.platform === 'drive' ? 'Drive file' : `${PLATFORM_LABEL[link.platform]} post`
+      const { data, error } = await svc.from('deliverable_proofs').insert({ org_id: profile.org_id, deliverable_id: d.id, kind: 'link', name, url: link.url, platform: link.platform, event_id: b.event_id ?? null, drive_file_id: null, note: typeof b.note === 'string' ? b.note.trim().slice(0, 500) || null : null, added_by: profile.id }).select(SELECT).single()
       if (error?.code === '23505') throw new ApiError(409, 'That link is already attached to this deliverable')
       if (error) throw new ApiError(400, error.message)
       await writeAudit({ orgId: profile.org_id, actorId: profile.id, action: 'deliverable_proof_linked', entityType: 'deliverable', entityId: d.id, after: { proof_id: data.id } })

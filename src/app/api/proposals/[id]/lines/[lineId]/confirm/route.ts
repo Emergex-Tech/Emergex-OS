@@ -10,7 +10,8 @@ import { errorResponse } from '@/lib/apiError'
 // stack itself (an override that changes numbers should go through
 // /margin, which any margin.set holder — including CEO — can call; this
 // endpoint is specifically for the confirm-or-flag-a-reason action).
-export async function PATCH(req: NextRequest, { params }: { params: { lineId: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ lineId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const body = await req.json().catch(() => ({}))

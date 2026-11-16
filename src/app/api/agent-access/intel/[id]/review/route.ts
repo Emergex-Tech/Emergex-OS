@@ -10,7 +10,8 @@ import { errorResponse } from '@/lib/apiError'
  * becomes a market_intel price record — and market-intel prices feed the "above known market price" warnings,
  * so an unreviewed agent's number must never get in. Each note can be reviewed exactly once.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'agent.intel.review')

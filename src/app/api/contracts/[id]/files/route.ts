@@ -19,7 +19,8 @@ async function loadContract(orgId: string, id: string) {
 }
 
 /** B3: every version of every document on a contract, newest first. contract.manage only — these can hold agent cuts. */
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'contract.manage')
@@ -38,7 +39,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
  * file exists nowhere else — so if Drive can't take it we refuse and save NOTHING rather than record a file we don't have.
  * Re-uploading identical bytes is a no-op, not a new version.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'contract.manage')

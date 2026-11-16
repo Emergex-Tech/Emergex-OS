@@ -12,7 +12,8 @@ const SELECT = 'id, item_id, display_title, indicative_price, price_currency, it
  * One shared item, addressed by its GRANT id. A grant that doesn't exist, belongs to another agent, or has been
  * revoked all give the SAME 404 — so probing ids can't reveal that an item exists or who it is shared with.
  */
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
+export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const ctx = await requireAgent()
     if (!isUuid(params.id)) throw new ApiError(404, 'Not found')

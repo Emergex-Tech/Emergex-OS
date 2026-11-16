@@ -11,7 +11,8 @@ import { errorResponse } from '@/lib/apiError'
  * A Manager/CEO's own request is approved on the spot (the reason is still recorded).
  * The server recomputes the conflicts itself — it never trusts what the client says was flagged.
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.create')

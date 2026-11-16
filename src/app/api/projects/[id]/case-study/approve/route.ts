@@ -12,7 +12,8 @@ import { errorResponse } from '@/lib/apiError'
  * (checked here with a readable list, and again by the database as the final guard). D16: anonymised by default —
  * the NAMED version is only usable in a pitch if you say the brand agreed ({named_use_approved:true}).
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.manage')

@@ -19,7 +19,8 @@ async function loadFile(orgId: string, contractId: string, fileId: string) {
 }
 
 /** Streams the file through the service account, so no one needs Drive access of their own. Forced to download, never rendered in-page. */
-export async function GET(_req: NextRequest, { params }: { params: { id: string; fileId: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string; fileId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'contract.manage')
@@ -39,7 +40,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string;
 }
 
 /** { action: 'make_current' } — roll back to (or forward to) a particular version of that document. */
-export async function PATCH(req: NextRequest, { params }: { params: { id: string; fileId: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string; fileId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'contract.manage')

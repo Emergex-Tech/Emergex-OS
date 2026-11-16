@@ -5,7 +5,8 @@ import { supabaseService } from '@/lib/supabaseServer'
 import { computeMarginStack, computeWarnings, resolveAgentConfig, getPricingContext, type PricingMechanic } from '@/lib/pricing'
 import { errorResponse } from '@/lib/apiError'
 
-export async function PATCH(req: NextRequest, { params }: { params: { lineId: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ lineId: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const body = await req.json()

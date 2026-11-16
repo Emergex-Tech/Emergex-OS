@@ -6,7 +6,8 @@ import { generateTempPassword } from '@/lib/passwords'
 import { errorResponse } from '@/lib/apiError'
 
 /** Admin sets a new temporary password and reads it once to hand to the user — no email dependency. */
-export async function POST(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'user.manage')

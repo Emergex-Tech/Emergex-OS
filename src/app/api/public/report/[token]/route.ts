@@ -10,7 +10,8 @@ import { isUuid } from '@/lib/ids'
  * THE PUBLIC REPORT — no login. The link is looked up on every request; the report is built from the allow-list; if a forbidden
  * name would show, or the view cannot be logged, NOTHING is served. Every failure is the same 404.
  */
-export async function GET(req: NextRequest, { params }: { params: { token: string } }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ token: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const hit = await resolveLink(params.token); if (!hit) return notFound()
     const svc = supabaseService()

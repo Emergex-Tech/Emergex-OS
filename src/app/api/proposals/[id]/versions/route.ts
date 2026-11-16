@@ -6,7 +6,8 @@ import { supabaseService } from '@/lib/supabaseServer'
 import { errorResponse } from '@/lib/apiError'
 
 /** A15: list a proposal's versions with their change records. Brand-facing data only, so every internal role may read it. */
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const svc = supabaseService()
@@ -28,7 +29,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
 }
 
 /** Save a version on demand. If nothing changed since the latest version, no new one is created. */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.create')

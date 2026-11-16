@@ -9,7 +9,8 @@ import { errorResponse } from '@/lib/apiError'
 
 const MAX_ACTIVE_LINKS = 20
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const project = await loadReportProject(profile.org_id, params.id)
@@ -26,7 +27,8 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
  * Creates a read-only link. The token is shown ONCE (here) and never stored — only its SHA-256. Refused unless external links
  * have been released, and refused while the report would show a forbidden name (a vendor or delivery-side agent, D18).
  */
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'project.manage')

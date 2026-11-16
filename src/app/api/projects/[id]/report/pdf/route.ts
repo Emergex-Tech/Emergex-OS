@@ -11,7 +11,8 @@ import { errorResponse } from '@/lib/apiError'
 
 export const runtime = 'nodejs'
 /** Staff PDF of the report as it stands now, or of any saved snapshot (?snapshot=<id>). */
-export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     const project = await loadReportProject(profile.org_id, params.id)

@@ -9,7 +9,8 @@ import { isUuid } from '@/lib/ids'
 
 export const runtime = 'nodejs'
 /** The PDF of the current report or of a saved snapshot (?snapshot=). Same rules as the page: any forbidden name or unlogged view = nothing. */
-export async function GET(req: NextRequest, { params }: { params: { token: string } }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ token: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const hit = await resolveLink(params.token); if (!hit) return notFound()
     const sid = req.nextUrl.searchParams.get('snapshot')

@@ -14,7 +14,8 @@ async function loadGrant(orgId: string, id: string) {
 }
 
 /** Edit the white-label title or the indicative price of an ACTIVE grant. */
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'agent.share.manage')
@@ -30,7 +31,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 }
 
 /** Revoke: soft (kept for the audit trail) and immediate — the agent's very next request gets a 404 for it. */
-export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'agent.share.manage')

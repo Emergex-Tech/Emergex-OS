@@ -7,7 +7,8 @@ import { isUuid } from '@/lib/ids'
 import { errorResponse } from '@/lib/apiError'
 
 /** An entry cannot be edited or deleted. A wrong one is VOIDED (with a reason, once) and the right figure recorded as a new entry. */
-export async function POST(req: NextRequest, { params }: { params: { id: string; mid: string } }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string; mid: string }> }) {
+  const params = await ctx.params   // Next 15+: route params arrive as a Promise
   try {
     const profile = await requireProfile()
     await requirePermission(profile, 'record.update')
