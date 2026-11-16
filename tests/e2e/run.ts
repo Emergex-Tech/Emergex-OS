@@ -57,7 +57,7 @@ async function call(handler: Handler, o: { as?: string; method?: string; query?:
   if (o.body !== undefined) { init.body = JSON.stringify(o.body); init.headers = { 'content-type': 'application/json' } }
   if (o.form) init.body = o.form
   if (o.headers) init.headers = { ...(init.headers ?? {}), ...o.headers }
-  const res = await handler(new NextRequest(`http://localhost/api/x${o.query ?? ''}`, init), { params: o.params ?? {} })
+  const res = await handler(new NextRequest(`http://localhost/api/x${o.query ?? ''}`, init), { params: Promise.resolve(o.params ?? {}) })
   const json = (res.headers.get('content-type') ?? '').includes('json') ? await res.json() : null
   return { status: res.status, json, res }
 }
@@ -112,6 +112,9 @@ async function main() {
     checklistAdd: await load('projects/[id]/checklist'), checklistItem: await load('projects/[id]/checklist/[itemId]'), parties: await load('projects/[id]/parties'),
     partyById: await load('projects/[id]/parties/[partyId]'), comms: await load('projects/[id]/communications'), commResolve: await load('projects/[id]/communications/[cid]/resolve'),
     templates: await load('checklist-templates'), templateItems: await load('checklist-templates/[key]/items'), templateItemById: await load('checklist-template-items/[id]'),
+    revenue: await load('revenue'), revenuePlan: await load('revenue/plan'), revenueWeights: await load('revenue/weights'),
+    runningDeals: await load('running-deals'), tiPreview: await load('projects/[id]/tracker-import/preview'), tiPostLog: await load('projects/[id]/tracker-import/post-log'), tiDeliverables: await load('projects/[id]/tracker-import/deliverables'), tiCampaign: await load('projects/[id]/tracker-import/campaign'), tiStatus: await load('projects/[id]/tracker-import/status-list'),
+    events: await load('deliverables/[id]/events'), eventVoid: await load('deliverables/[id]/events/[eventId]/void'),
     makeGood: await load('deliverables/[id]/make-good'), invAdj: await load('deliverables/[id]/invoice-adjustment'),
     metricDefs: await load('metric-definitions'), metricDefById: await load('metric-definitions/[category]/[key]'), metrics: await load('projects/[id]/metrics'), metricVoid: await load('projects/[id]/metrics/[mid]/void'),
     proofs: await load('deliverables/[id]/proofs'), proofById: await load('deliverables/[id]/proofs/[proofId]'),
@@ -1672,7 +1675,7 @@ async function main() {
     const r = await preview(S.rP); assert.equal(r.status, 200, JSON.stringify(r.json).slice(0, 200)); const rep = r.json.report
     assert.deepEqual(Object.keys(rep), REPORT_KEYS); assert.equal(r.json.safe_to_share, true); assert.equal(r.json.links_released, true)
     assert.deepEqual(rep.deliverables.map((x: any) => [x.description, x.status, x.pct, x.proofs.length]), [['Perimeter boards', 'delivered', 100, 0], ['Social posts', 'partial', 75, 0], ['Hospitality', 'missed', 0, 0]], 'proof is hidden by DEFAULT')
-    assert.deepEqual(rep.delivery, { pct: 58.3, counted: 3, delivered: 1, partial: 1, planned: 0, missed: 1, replaced_excluded: 0 })
+    assert.deepEqual(rep.delivery, { pct: 58.3, counted: 3, delivered: 1, partial: 1, planned: 0, missed: 1, replaced_excluded: 0, waived_excluded: 0 })
     assert.deepEqual(rep.metrics.summary.map((m: any) => [m.label, m.value, m.readings]), [['Matches', 12, 2]], 'A\'s newer reading (8) replaces its older (3): 8 + 4')
     const proofsList = async (del: string) => (await call(H.proofs.GET, { as: TEAM, params: { id: del } })).json
     assert.ok((await proofsList(S.rA)).every((p: any) => p.report_visible === false), 'every proof starts hidden')
@@ -1865,6 +1868,322 @@ async function main() {
     assert.equal((await repCeo()).snapshots_overdue, 1)
     const run = await call(H.cron.GET, { headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } }); assert.equal(run.status, 200); assert.ok(run.json.taken >= 1); assert.equal(await alertGroup('Report snapshots overdue'), undefined, 'the job caught up: cleared'); assert.equal((await repCeo()).snapshots_overdue, 0)
     assert.equal((await putSettings(S.pThird, { cadence: 'manual' })).status, 200); assert.equal((await putSettings(S.rAgentP, { cadence: 'manual' })).status, 200)
+  })
+
+  console.log('\nTracker foundation — the delivery log, waived, social proof links, periods, the vendor guarantee, metric segments')
+  const logOf = (del: string, q = '', as = TEAM) => call(H.events.GET, { as, params: { id: del }, query: q })
+  const logIt = (del: string, body: unknown, as = TEAM) => call(H.events.POST, { as, method: 'POST', body, params: { id: del } })
+  const patchDel = (del: string, body: unknown, as = MANAGER) => call(H.deliverableById.PATCH, { as, method: 'PATCH', body, params: { id: del } })
+  const delRow = async (del: string) => (await svc.from('deliverables').select('status, delivered_quantity, waived_reason, period_label, vendor_quantity').eq('id', del).single()).data!
+  const IG = (n: number) => `https://www.instagram.com/p/POST${n}/`, FB = (n: number) => `https://www.facebook.com/share/p/POST${n}/`
+
+  await step('setup + period and vendor guarantee: a deliverable carries its period ("LPL 2026") and, internally, what the VENDOR guaranteed us', async () => {
+    const d = await winDeal('team', 'tracker'); S.tP = d.projectId; const ctr = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: d.dealId, renewal_date: '2027-06-01' } }); assert.equal(ctr.status, 201); S.tCtr = ctr.json.id
+    const mk = async (body: Record<string, unknown>) => { const r = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body, params: { id: S.tCtr } }); assert.equal(r.status, 201, JSON.stringify(r.json)); return r.json.id as string }
+    S.tPosts = await mk({ description: 'Branded posts', planned_quantity: 18, unit: 'posts', period_label: 'LPL 2026', due_date: '2026-08-08' }); S.tImp = await mk({ description: 'Guaranteed impressions', planned_quantity: 3000000, unit: 'impressions', vendor_quantity: 4000000 })
+    S.tMeet = await mk({ description: 'Meet and greet', planned_quantity: 1 }); S.tOther = await mk({ description: 'Bat stickers', planned_quantity: 15 })
+    for (const bad of [{ description: 'x', period_label: 'p'.repeat(41) }, { description: 'x', vendor_quantity: 0 }, { description: 'x', vendor_quantity: -5 }, { description: 'x', vendor_quantity: 'lots' }]) assert.equal((await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: bad, params: { id: S.tCtr } })).status, 400, JSON.stringify(bad))
+    const row = (await proj(S.tP)).json.deliverables.items.find((x: any) => x.id === S.tImp); assert.deepEqual([row.vendor_quantity, row.planned_quantity, row.log_count], [4000000, 3000000, 0]); assert.equal((await proj(S.tP)).json.deliverables.items.find((x: any) => x.id === S.tPosts).period_label, 'LPL 2026')
+    assert.equal((await patchDel(S.tPosts, { period_label: 'Season 2026' })).status, 200); assert.equal((await patchDel(S.tPosts, { period_label: 'Season 2026' }, TEAM)).status, 403, 'the terms are Manager/CEO'); assert.equal((await patchDel(S.tImp, { vendor_quantity: null })).status, 200); assert.equal((await patchDel(S.tImp, { vendor_quantity: 4000000 })).status, 200)
+    assert.deepEqual([(await delRow(S.tPosts)).period_label, Number((await delRow(S.tImp)).vendor_quantity)], ['Season 2026', 4000000]); await patchDel(S.tPosts, { period_label: 'LPL 2026' })
+  })
+
+  await step('the delivery log: each entry (a post, a match) moves the delivered number BY ITSELF; bad entries and bad links save nothing; the number cannot be typed over', async () => {
+    const r = await logIt(S.tPosts, { occurred_on: isoDay(-5), quantity: 2, label: 'vs Jaffna Kings', note: 'EVENT-NOTE-SECRET internal', links: [IG(1), FB(1)] }); assert.equal(r.status, 201, JSON.stringify(r.json)); assert.deepEqual(r.json.deliverable, { status: 'partial', delivered_quantity: 2, planned_quantity: 18 }); assert.equal(r.json.links, 2); S.tE1 = r.json.id
+    const l = await logOf(S.tPosts); assert.equal(l.status, 200); assert.deepEqual([l.json.events.length, l.json.events[0].label, l.json.events[0].quantity, l.json.events[0].created_by_name, l.json.events[0].source], [1, 'vs Jaffna Kings', 2, 'team user', 'manual'])
+    assert.deepEqual(l.json.events[0].links.map((x: any) => [x.platform, x.report_visible]).sort(), [['facebook', false], ['instagram', false]], 'links attach to the entry, hidden from the brand by default')
+    assert.equal((await logIt(S.tPosts, { occurred_on: isoDay(-4) })).json.deliverable.delivered_quantity, 3, 'quantity defaults to 1')
+    const before = await count('deliverable_events', { deliverable_id: S.tPosts }), proofsBefore = await count('deliverable_proofs', { deliverable_id: S.tPosts })
+    for (const bad of [{}, { occurred_on: 'soon' }, { occurred_on: '2026-02-30' }, { occurred_on: isoDay(3) }, { occurred_on: isoDay(-1), quantity: 0 }, { occurred_on: isoDay(-1), quantity: -2 }, { occurred_on: isoDay(-1), quantity: 'two' }, { occurred_on: isoDay(-1), label: 'x'.repeat(201) }, { occurred_on: isoDay(-1), note: 'n'.repeat(501) },
+      { occurred_on: isoDay(-1), links: 'https://www.instagram.com/p/x/' }, { occurred_on: isoDay(-1), links: Array.from({ length: 9 }, (_, i) => IG(100 + i)) }, { occurred_on: isoDay(-1), links: [IG(50), 'https://evil.example/steal'] }, { occurred_on: isoDay(-1), links: [IG(50), 'https://www.instagram.com.evil.example/p/x/'] }, { occurred_on: isoDay(-1), links: [IG(51), IG(51)] }, { occurred_on: isoDay(-1), links: ['javascript:alert(1)'] }])
+      assert.equal((await logIt(S.tPosts, bad)).status, 400, JSON.stringify(bad).slice(0, 80))
+    const dup = await logIt(S.tPosts, { occurred_on: isoDay(-1), links: [IG(1)] }); assert.equal(dup.status, 409); assert.match(dup.json.error, /Already attached/)
+    assert.equal(await count('deliverable_events', { deliverable_id: S.tPosts }), before, 'every refused entry saved NOTHING'); assert.equal(await count('deliverable_proofs', { deliverable_id: S.tPosts }), proofsBefore, '…and no stray link')
+    const typed = await patchDel(S.tPosts, { delivered_quantity: 18 }, TEAM); assert.equal(typed.status, 409); assert.match(typed.json.error, /tracked by its delivery log/); assert.match((await svc.from('deliverables').update({ delivered_quantity: 18, status: 'delivered' }).eq('id', S.tPosts)).error?.message ?? '', /delivery log/, 'and the DATABASE refuses it too')
+    assert.equal((await patchDel(S.tOther, { delivered_quantity: 5 }, TEAM)).status, 200, 'a deliverable WITHOUT a log still takes a typed number')
+    assert.equal((await logIt(S.tPosts, { occurred_on: isoDay(-3), quantity: 15, label: 'the rest' })).json.deliverable.status, 'delivered'); assert.equal((await logIt(S.tPosts, { occurred_on: isoDay(-2), quantity: 1 })).json.deliverable.delivered_quantity, 19, 'over-delivery keeps the true total')
+    assert.equal((await logIt(S.tPosts, { occurred_on: isoDay(-1) }, AGENT_A)).status, 403); assert.equal((await logIt(NIL, { occurred_on: isoDay(-1) })).status, 404); assert.equal((await logIt(S.lockDel, { occurred_on: isoDay(-1) })).status, 400, 'a CLOSED project\'s log is locked'); assert.ok(await count('audit_events', { action: 'delivery_logged' }) >= 4)
+  })
+
+  await step('voiding a log entry (never editing it) recalculates the number and archives the links it carried', async () => {
+    const v = (del: string, id: string, body: unknown, as = TEAM) => call(H.eventVoid.POST, { as, method: 'POST', body, params: { id: del, eventId: id } })
+    assert.equal((await v(S.tPosts, S.tE1, {})).status, 400, 'a reason is required'); assert.equal((await v(S.tPosts, NIL, { reason: 'x' })).status, 404); assert.equal((await v(S.tOther, S.tE1, { reason: 'x' })).status, 404, 'not through another deliverable'); assert.equal((await v(S.tPosts, S.tE1, { reason: 'x' }, AGENT_A)).status, 403)
+    const r = await v(S.tPosts, S.tE1, { reason: 'Logged against the wrong match' }); assert.equal(r.status, 200); assert.deepEqual(r.json.deliverable, { status: 'partial', delivered_quantity: 17 }, '19 − 2, and no longer "delivered"')
+    assert.equal((await v(S.tPosts, S.tE1, { reason: 'again' })).status, 409); assert.equal((await logOf(S.tPosts)).json.events.some((e: any) => e.id === S.tE1), false, 'hidden by default')
+    const all = (await logOf(S.tPosts, '?include_voided=1')).json.events.find((e: any) => e.id === S.tE1); assert.deepEqual([all.void_reason, !!all.voided_at], ['Logged against the wrong match', true])
+    assert.equal((await call(H.proofs.GET, { as: TEAM, params: { id: S.tPosts } })).json.filter((p: any) => p.event_id === S.tE1).length, 0, 'its links went with it'); assert.equal(await count('deliverable_proofs', { event_id: S.tE1 }), 2, 'archived, not deleted')
+    assert.ok((await svc.from('deliverable_events').update({ quantity: 99 }).eq('id', S.tE1)).error, 'the DATABASE refuses an edit'); assert.ok((await svc.from('deliverable_events').delete().eq('id', S.tE1)).error)
+    assert.equal((await logIt(S.tPosts, { occurred_on: isoDay(-5), quantity: 2, label: 'vs Jaffna Kings', links: [IG(1), FB(1)], show_links_to_brand: true })).status, 201, 'the same links can be logged again once the wrong entry is voided')
+  })
+
+  await step('"waived by the brand": Manager/CEO only, always with a reason; neither delivered nor missed; nothing can be logged on it; it can be reinstated', async () => {
+    assert.equal((await patchDel(S.tMeet, { status: 'waived', waived_reason: 'x' }, TEAM)).status, 403)
+    for (const bad of [{ status: 'waived' }, { status: 'waived', waived_reason: '  ' }, { status: 'waived', waived_reason: 'r'.repeat(501) }, { waived_reason: 'no status' }, { status: 'cancelled' }, { status: 'delivered' }, { status: 'reinstate' }]) assert.equal((await patchDel(S.tMeet, bad)).status, 400, JSON.stringify(bad).slice(0, 60))
+    const before = (await preview(S.tP)).json.report.delivery
+    const w = await patchDel(S.tMeet, { status: 'waived', waived_reason: 'WAIVE-SECRET: not wanted by the brand' }); assert.equal(w.status, 200, JSON.stringify(w.json)); assert.deepEqual([w.json.status, (await delRow(S.tMeet)).waived_reason], ['waived', 'WAIVE-SECRET: not wanted by the brand'])
+    const after = (await preview(S.tP)).json.report.delivery; assert.deepEqual([after.counted, after.waived_excluded], [before.counted - 1, 1]); assert.ok(after.pct > before.pct, `leaving out a 0% item raises the average: ${before.pct} -> ${after.pct}`)
+    assert.equal((await patchDel(S.tMeet, { status: 'waived', waived_reason: 'again' })).status, 409); assert.equal((await patchDel(S.tMeet, { status: 'missed' })).status, 400); assert.equal((await patchDel(S.tMeet, { delivered_quantity: 1 }, TEAM)).status, 400); assert.equal((await logIt(S.tMeet, { occurred_on: isoDay(-1) })).status, 400)
+    assert.ok([400, 409].includes((await call(H.makeGood.POST, { as: MANAGER, method: 'POST', body: { description: 'MG' }, params: { id: S.tMeet } })).status), 'a waived deliverable needs no make-good')
+    assert.equal((await patchDel(S.tMeet, { description: 'Meet and greet (virtual)' })).json.status, 'waived', 'editing its wording leaves it waived')
+    assert.ok(!(await call(H.closure.GET, { as: TEAM, params: { id: S.tP } })).json.issues.some((i: any) => i.code === 'missed_unresolved'), 'waived work is not an unresolved miss')
+    assert.equal((await patchDel(S.tMeet, { status: 'reinstate' }, TEAM)).status, 403); const back = await patchDel(S.tMeet, { status: 'reinstate' }); assert.deepEqual([back.json.status, (await delRow(S.tMeet)).waived_reason], ['planned', null]); assert.equal((await logIt(S.tMeet, { occurred_on: isoDay(-1) })).json.deliverable.status, 'delivered', 'reinstated: it works again')
+    assert.equal((await patchDel(S.tOther, { status: 'waived', waived_reason: 'WAIVE-SECRET: brand dropped the stickers' })).status, 200); assert.equal(Number((await delRow(S.tOther)).delivered_quantity), 5, 'waiving keeps what was already delivered')
+  })
+
+  await step('social post links as proof: Instagram, Facebook, X, TikTok and YouTube accepted and named; look-alikes refused; a link can sit on one log entry — of its OWN deliverable only', async () => {
+    const add = (del: string, body: unknown, as = TEAM) => call(H.proofs.POST, { as, method: 'POST', body, params: { id: del } })
+    const got: string[][] = []; for (const u of ['https://x.com/sunnyleone/status/1820', 'https://vt.tiktok.com/ZSYKdB/', 'https://youtu.be/abc123', 'https://fb.watch/tH8UeSNWB5/', 'https://drive.google.com/drive/folders/15Ep1JDQJW9N5YPA']) { const r = await add(S.tImp, { url: u }); assert.equal(r.status, 201, `${u}: ${JSON.stringify(r.json)}`); got.push([r.json.platform, r.json.name]) }
+    assert.deepEqual(got, [['x', 'X post'], ['tiktok', 'TikTok post'], ['youtube', 'YouTube post'], ['facebook', 'Facebook post'], ['drive', 'Drive file']])
+    for (const bad of ['https://www.instagram.com.evil.example/p/x/', 'https://evilx.com/a/status/1', 'http://www.instagram.com/p/x/', 'https://bit.ly/abc', 'https://user:pw@x.com/a', 'https://www.tiktok.com:8443/@a/video/1', 'javascript:alert(1)']) assert.equal((await add(S.tImp, { url: bad })).status, 400, bad)
+    const ev = (await logOf(S.tPosts)).json.events[0].id; const onEntry = await add(S.tPosts, { url: 'https://www.instagram.com/reel/EXTRA1/', event_id: ev }); assert.equal(onEntry.status, 201); assert.equal(onEntry.json.event_id, ev)
+    const wrong = await add(S.tImp, { url: 'https://www.instagram.com/reel/EXTRA2/', event_id: ev }); assert.equal(wrong.status, 400); assert.match(wrong.json.error, /its own deliverable/); assert.equal((await add(S.tImp, { url: 'https://www.instagram.com/reel/EXTRA3/', event_id: 'nope' })).status, 400)
+  })
+
+  await step('the brand report: log entries on the timeline, the period, social links (only if ticked) — and NEVER the vendor guarantee, a waive reason or a log note', async () => {
+    const rep = (await preview(S.tP)).json.report; assert.equal((await preview(S.tP)).json.safe_to_share, true)
+    const posts = rep.deliverables.find((x: any) => x.description === 'Branded posts'); assert.equal(posts.period, 'LPL 2026')
+    assert.deepEqual(posts.proofs.map((p: any) => p.url).sort(), [FB(1), IG(1)].sort(), 'only the links logged with show_links_to_brand — the EXTRA1 reel was not ticked')
+    assert.ok(rep.timeline.some((e: any) => e.type === 'delivery' && e.text === 'Branded posts: vs Jaffna Kings' && e.date === isoDay(-5))); assert.ok(rep.timeline.some((e: any) => e.type === 'delivery' && e.text === 'Branded posts: 15 posts delivered') === false, 'a label, when given, is what shows'); assert.ok(rep.timeline.some((e: any) => e.text === 'Branded posts: the rest'))
+    assert.equal(rep.timeline.filter((e: any) => e.type === 'delivery' && e.text.includes('Jaffna')).length, 1, 'the VOIDED entry is not on the timeline — only its replacement')
+    assert.deepEqual(rep.deliverables.find((x: any) => x.description === 'Bat stickers').status, 'waived'); assert.equal(rep.delivery.waived_excluded, 1)
+    const l = await mkLink(S.tP); assert.equal(l.status, 201, JSON.stringify(l.json)); const pubR = await pub(l.json.token); assert.equal(pubR.status, 200)
+    const blob = JSON.stringify(pubR.json); for (const secret of ['4000000', 'vendor_quantity', 'WAIVE-SECRET', 'waived_reason', 'EVENT-NOTE-SECRET', 'team user', 'EXTRA1']) assert.ok(!blob.includes(secret), `LEAKED PUBLICLY: ${secret}`); assert.ok(blob.includes('3000000'), 'while the brand\'s OWN guarantee is shown')
+    const pdf = pdfText(new Uint8Array(await (await call(H.pubPdf.GET, { params: { token: l.json.token } })).res.arrayBuffer())); for (const secret of ['4,000,000', '4000000', 'WAIVE-SECRET', 'EVENT-NOTE-SECRET']) assert.ok(!pdf.includes(secret), `LEAKED INTO THE PDF: ${secret}`); assert.ok(pdf.includes('Branded posts (LPL 2026)') && pdf.includes('Waived by the brand'))
+    await call(H.reportRevoke.POST, { as: MANAGER, method: 'POST', params: { id: S.tP, linkId: l.json.id } })
+  })
+
+  await step('metric segments (region / ad type): each keeps its own running total; the headline adds them; a newer reading replaces only its own segment', async () => {
+    const add = (v: number, seg: string | undefined, on: number) => rec(S.tP, { metric_key: 'exposure', value: v, source: 'Publisher dashboard', recorded_on: isoDay(on), deliverable_id: S.tImp, segment: seg })
+    for (const [v, seg, on] of [[100, 'IN · Banner', -6], [250, 'IN · Banner', -2], [40, 'PK · Banner', -4], [10, 'IN · Interstitial', -5]] as const) assert.equal((await add(v, seg, on)).status, 201)
+    const m = (await metricsOf(S.tP)).json; const x = m.summary.find((s: any) => s.metric_key === 'exposure'); assert.deepEqual([x.value, x.subjects], [300, 3], '250 + 40 + 10: India banner counted once, at its latest'); assert.ok(m.entries.some((e: any) => e.segment === 'PK · Banner'))
+    assert.equal((await add(1, 'x'.repeat(61), -1)).status, 400); assert.equal((await rec(S.tP, { metric_key: 'exposure', value: 1, source: 's', segment: 5 })).status, 400); assert.equal((await rec(S.tP, { metric_key: 'exposure', value: 1, source: 's', segment: '   ' })).status, 400)
+    assert.equal((await preview(S.tP)).json.report.metrics.summary.find((s: any) => s.label === 'Exposure').value, 300, 'and the brand report shows the same total')
+  })
+
+  console.log('\nTracker import — entering a running deal, and importing a deliverables list and a post log from a real .xlsx')
+  const ExcelJS = (await import('exceljs')).default
+  const { buildWonLostAnalysis } = await import('../../src/lib/wonLost')
+  const GREEN = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FF93C47D' } }
+  const igp = (id: string) => `https://www.instagram.com/p/${id}/`
+  const trackerFile = async () => {
+    const wb = new ExcelJS.Workbook()
+    const d = wb.addWorksheet('Deliverables'); d.addRow(['SUNNY BRAND AMBASSADOR', 'SUNNY BRAND AMBASSADOR', 'SUNNY BRAND AMBASSADOR', 'SUNNY BRAND AMBASSADOR']); d.addRow(['SR NO', 'DELIVERABLES/T&CS', 'DETAILS', 'REMARKS'])
+    d.addRow([1, 'Brand shoot (Static and video)', '2 Days per year', '8 hours per day']); d.addRow([2, 'Social Media Posts on IG/FB/TikTok', '24 per year', 'Reel + static']); d.addRow([3, 'Instagram Stories', '24 per year', null]); d.addRow([4, 'Contract Length', '3 Years', null]); d.addRow([5, 'Region of Rights', 'Global', null])
+    const t = wb.addWorksheet('SM Tracker Year 1'); t.addRow(['Sr No.', 'Date', 'Instagram Link', 'Facebook Link', 'Twitter Link', 'TikTok'])
+    t.addRow([1, '1 August 2024 ( Announcement Post', { text: igp('IMP1'), hyperlink: igp('IMP1') + '?igsh=TRACKING' }, 'https://www.facebook.com/share/p/IMP1/', 'https://x.com/sunny/status/9001', 'https://vt.tiktok.com/IMP1/'])
+    t.addRow([2, '4th October 2024', { text: igp('IMP2'), hyperlink: igp('IMP2') }, 'https://fb.watch/IMP2/', '-', '-']); t.addRow([3, new Date(Date.UTC(2024, 9, 27)), igp('IMP3'), null, null, null]); t.addRow([4, null, igp('IMP4'), null, null, null])
+    t.addRow([24, null, null, null, null, null]); t.addRow([null, null, null, null, 'Log in or sign up to view', null])
+    const g = wb.addWorksheet('Post Tracker'); g.addRow(['Sr. No', 'Link', 'Post', null, '*notes'])
+    g.addRow([1, { text: igp('GRN1'), hyperlink: igp('GRN1') + '?utm_source=ig' }, null, null, 'Highlighted in green means brand has accepted those posts as collabs']); g.addRow([2, igp('GRN2'), null, null, null]); g.addRow([3, igp('PLAIN3'), null, null, null])
+    g.getCell('B2').fill = GREEN; g.getCell('B3').fill = GREEN
+    wb.addWorksheet('Squad List').addRow(['Player', 'Followers'])
+    return Buffer.from(await wb.xlsx.writeBuffer())
+  }
+  const previewT = (pid: string, buf: Buffer, fields: Record<string, string> = {}, name = 'tracker.xlsx', as = TEAM) => call(H.tiPreview.POST, { as, method: 'POST', form: form(buf, name, fields), params: { id: pid } })
+
+  await step('a deal that is ALREADY RUNNING is entered in one step — proposal (Won, marked), deal, contract and live project — and never counts in win-rate statistics', async () => {
+    const itemA = (await svc.from('items').select('id').eq('name', 'S3 item lock').single()).data!.id, itemB = (await svc.from('items').select('id').eq('name', 'S3 item report').single()).data!.id
+    const enter = (body: unknown, as = MANAGER) => call(H.runningDeals.POST, { as, method: 'POST', body })
+    const good = { brand_id: S.Blitz, route_id: S.rBlitz, currency: 'USD', renewal_date: '2027-06-30', terms: '2-year ambassador deal', items: [{ item_id: itemA, sell_price: 75000 }, { item_id: itemB, sell_price: 0 }] }
+    const stats = JSON.stringify(await buildWonLostAnalysis(S.orgId)), before = await count('proposals')
+    assert.equal((await enter(good, TEAM)).status, 403, 'it creates a contract without pricing approval, so Manager/CEO only')
+    for (const bad of [{ ...good, brand_id: NIL }, { ...good, brand_id: 'nope' }, { ...good, route_id: NIL }, { ...good, brand_id: S.tiered }, { ...good, currency: 'usd' }, { ...good, currency: 'DOLLARS' }, { ...good, renewal_date: '2027-02-30' }, { ...good, renewal_date: undefined }, { ...good, items: [] }, { ...good, items: [{ item_id: NIL, sell_price: 1 }] },
+      { ...good, items: [{ item_id: itemA, sell_price: -1 }] }, { ...good, items: [{ item_id: itemA, sell_price: 'lots' }] }, { ...good, items: [{ item_id: itemA }] }, { ...good, items: [{ item_id: itemA, sell_price: 1 }, { item_id: itemA, sell_price: 2 }] }, { ...good, items: Array.from({ length: 21 }, () => ({ item_id: itemA, sell_price: 1 })) }, { ...good, terms: 't'.repeat(5001) }])
+      assert.equal((await enter(bad)).status, 400, JSON.stringify(bad).slice(0, 90))
+    assert.equal(await count('proposals'), before, 'every refused attempt created NOTHING')
+    const r = await enter(good); assert.equal(r.status, 201, JSON.stringify(r.json)); assert.deepEqual([r.json.final_amount, r.json.currency], [75000, 'USD']); S.runP = r.json.project_id; S.runCtr = r.json.contract_id
+    const prop = (await svc.from('proposals').select('stage, origin, brand_id, route_id, budget, created_by').eq('id', r.json.proposal_id).single()).data!; assert.deepEqual(prop, { stage: 'Won', origin: 'running_deal', brand_id: S.Blitz, route_id: S.rBlitz, budget: 75000, created_by: MANAGER })
+    const ctr = (await svc.from('contracts').select('final_amount, currency, renewal_date, terms, deal_id').eq('id', S.runCtr).single()).data!; assert.deepEqual([Number(ctr.final_amount), ctr.currency, ctr.renewal_date, ctr.terms, ctr.deal_id], [75000, 'USD', '2027-06-30', '2-year ambassador deal', r.json.deal_id])
+    assert.equal(await count('proposal_lines', { proposal_id: r.json.proposal_id }), 2); assert.equal(await count('proposal_stage_history', { proposal_id: r.json.proposal_id, to_stage: 'Won' }), 1)
+    const lineIds = ((await svc.from('proposal_lines').select('id').eq('proposal_id', r.json.proposal_id)).data ?? []).map((l) => l.id); assert.equal((await svc.from('proposal_line_pricing').select('proposal_line_id').in('proposal_line_id', lineIds)).data!.length, 0, 'NO cost is invented for a running deal')
+    const pd = (await proj(S.runP)).json; assert.equal(pd.project.status, 'active'); assert.ok(items(await proj(S.runP)).length >= 1, 'a real project, with its checklist'); assert.deepEqual(pd.categories, ['team'], 'and its category, from the inventory behind it')
+    assert.equal(JSON.stringify(await buildWonLostAnalysis(S.orgId)), stats, 'won/lost statistics are EXACTLY as before — a deal that was never pitched here does not flatter the win rate')
+    assert.ok((await svc.from('proposals').update({ origin: 'imported' }).eq('id', r.json.proposal_id)).error, 'the database only knows two origins'); assert.ok(await count('audit_events', { action: 'running_deal_entered' }) >= 1)
+  })
+
+  await step('import preview: reads a real .xlsx, says what each sheet looks like, shows what it understood — and saves NOTHING; junk files are refused', async () => {
+    const buf = await trackerFile(); const snap = async () => [await count('deliverables'), await count('deliverable_events'), await count('deliverable_proofs')]; const before = await snap()
+    const o = await previewT(S.runP, buf); assert.equal(o.status, 200, JSON.stringify(o.json).slice(0, 200)); assert.deepEqual(o.json.sheets.map((x: any) => [x.name, x.looks_like]), [['Deliverables', 'deliverables'], ['SM Tracker Year 1', 'post_log'], ['Post Tracker', 'post_log'], ['Squad List', null]]); assert.equal(o.json.has_contract, true)
+    const l = await previewT(S.runP, buf, { kind: 'deliverables', sheet: 'Deliverables' }); assert.equal(l.status, 200); assert.equal(l.json.result.headerRow, 2, 'the title row above the header is ignored')
+    assert.deepEqual(l.json.result.rows.map((x: any) => [x.description.slice(0, 18), x.kind, x.include, x.quantity, x.per]), [['Brand shoot (Stati', 'deliverable', true, 2, 'year'], ['Social Media Posts', 'deliverable', true, 24, 'year'], ['Instagram Stories', 'deliverable', true, 24, 'year'], ['Contract Length', 'term', false, 3, null], ['Region of Rights', 'term', false, 1, null]])
+    const p = await previewT(S.runP, buf, { kind: 'post_log', sheet: 'SM Tracker Year 1' }); assert.equal(p.status, 200); const rows = p.json.result.rows
+    assert.deepEqual(rows.map((x: any) => [x.date, x.label, x.links.map((k: any) => k.platform).join('+')]), [['2024-08-01', 'Announcement Post', 'instagram+facebook+x+tiktok'], ['2024-10-04', null, 'instagram+facebook'], ['2024-10-27', null, 'instagram'], [null, null, 'instagram']])
+    assert.equal(rows[0].links[0].url, igp('IMP1'), 'the link stored twice (clean text + tracked hyperlink) is ONE link, the clean one'); assert.deepEqual([p.json.result.undated, p.json.result.skipped], [1, 2])
+    const g = await previewT(S.runP, buf, { kind: 'post_log', sheet: 'Post Tracker' }); assert.deepEqual(g.json.result.rows.map((x: any) => [x.highlighted, x.label]), [[true, null], [true, null], [false, null]], 'green cells are read; the legend is not a caption'); assert.match(g.json.result.legends[0], /green means brand has accepted/)
+    assert.deepEqual(await snap(), before, 'four previews: NOTHING saved')
+    const noFile = new FormData(); noFile.append('kind', 'post_log'); assert.equal((await call(H.tiPreview.POST, { as: TEAM, method: 'POST', form: noFile, params: { id: S.runP } })).status, 400)
+    for (const [b2, name, fields, want] of [[buf, 'tracker.csv', {}, 400], [Buffer.from('name,qty\na,1'), 'fake.xlsx', {}, 400], [Buffer.concat([Buffer.from('PK'), Buffer.alloc(200, 7)]), 'corrupt.xlsx', {}, 400], [Buffer.alloc(0), 'empty.xlsx', {}, 400], [Buffer.concat([buf, Buffer.alloc(4 * 1024 * 1024)]), 'huge.xlsx', {}, 413],
+      [buf, 'tracker.xlsx', { kind: 'magic', sheet: 'Deliverables' }, 400], [buf, 'tracker.xlsx', { kind: 'post_log', sheet: 'No such sheet' }, 400], [buf, 'tracker.xlsx', { kind: 'post_log', sheet: 'SM Tracker Year 1', date_order: 'ymd' }, 400]] as const) assert.equal((await previewT(S.runP, b2 as Buffer, fields as Record<string, string>, name)).status, want, `${name} ${JSON.stringify(fields)}`)
+    assert.equal((await previewT(S.runP, buf, {}, 'tracker.xlsx', AGENT_A)).status, 403); assert.equal((await previewT(NIL, buf)).status, 404); assert.deepEqual(await snap(), before)
+  })
+
+  await step('deliverables-list import: Manager/CEO; one bad row creates nothing; importing the same list twice does not double it; needs a contract', async () => {
+    const imp = (pid: string, deliverables: unknown, as = MANAGER) => call(H.tiDeliverables.POST, { as, method: 'POST', body: { deliverables }, params: { id: pid } })
+    const list = [{ description: 'Social Media Posts on IG/FB/TikTok', planned_quantity: 24, unit: 'posts', period_label: 'Year 1' }, { description: 'Social Media Posts on IG/FB/TikTok', planned_quantity: 24, unit: 'posts', period_label: 'Year 2' }, { description: 'Brand shoot (Static and video)', planned_quantity: 2, unit: 'days', period_label: 'Year 1', due_date: '2026-12-31' }, { description: 'Collaboration with Brand Page' }]
+    assert.equal((await imp(S.runP, list, TEAM)).status, 403); const before = await count('deliverables', { contract_id: S.runCtr })
+    const bad = await imp(S.runP, [...list, { description: '  ', planned_quantity: 1 }, { description: 'x', planned_quantity: 0 }, { description: 'y', due_date: '2026-02-30' }, { description: 'z', period_label: 'p'.repeat(41) }]); assert.equal(bad.status, 400); assert.deepEqual(bad.json.rejected.map((x: any) => x.index), [4, 5, 6, 7]); assert.equal(await count('deliverables', { contract_id: S.runCtr }), before, 'bad rows: NOTHING created')
+    for (const junk of [[], 'nope', undefined, Array.from({ length: 201 }, () => ({ description: 'x' }))]) assert.equal((await imp(S.runP, junk)).status, 400)
+    const ok = await imp(S.runP, list); assert.equal(ok.status, 201, JSON.stringify(ok.json)); assert.deepEqual(ok.json, { created: 4, skipped_existing: 0 })
+    const rows = (await svc.from('deliverables').select('description, planned_quantity, unit, period_label, status, due_date, created_by').eq('contract_id', S.runCtr).order('created_at')).data!
+    assert.deepEqual(rows.map((r) => [r.description.slice(0, 12), Number(r.planned_quantity), r.period_label, r.status]), [['Social Media', 24, 'Year 1', 'planned'], ['Social Media', 24, 'Year 2', 'planned'], ['Brand shoot ', 2, 'Year 1', 'planned'], ['Collaboratio', 1, null, 'planned']]); assert.ok(rows.every((r) => r.created_by === MANAGER))
+    assert.deepEqual((await imp(S.runP, list)).json, { created: 0, skipped_existing: 4 }, 'the same list again adds nothing'); assert.deepEqual((await imp(S.runP, [...list, { description: 'Instagram Stories', planned_quantity: 24, period_label: 'Year 1' }])).json, { created: 1, skipped_existing: 4 }, 'only what is new')
+    const noCtr = await imp(S.rAgentP, list); assert.equal(noCtr.status, 409); assert.match(noCtr.json.error, /no contract yet/); assert.equal((await imp(NIL, list)).status, 404)
+    S.runPosts = (await svc.from('deliverables').select('id').eq('contract_id', S.runCtr).eq('period_label', 'Year 1').like('description', 'Social%').single()).data!.id; S.runShoot = (await svc.from('deliverables').select('id').eq('contract_id', S.runCtr).like('description', 'Brand shoot%').single()).data!.id
+  })
+
+  await step('post-log import: each reviewed row becomes a log entry with its links; the delivered number follows; re-importing adds only what is new; one bad row imports nothing', async () => {
+    const buf = await trackerFile(); const rows = (await previewT(S.runP, buf, { kind: 'post_log', sheet: 'SM Tracker Year 1' })).json.result.rows
+    const entries = rows.map((x: any) => ({ occurred_on: x.date ?? '2024-11-01', label: x.label ?? undefined, links: x.links.map((k: any) => k.url) }))      // the reviewer supplied a date for the undated row
+    const imp = (body: unknown, as = TEAM, pid = S.runP) => call(H.tiPostLog.POST, { as, method: 'POST', body, params: { id: pid } })
+    const before = await count('deliverable_events', { deliverable_id: S.runPosts })
+    const bad = await imp({ deliverable_id: S.runPosts, entries: [...entries, { occurred_on: isoDay(5), links: [] }, { occurred_on: '2024-13-01' }, { occurred_on: '2024-11-02', links: ['https://evil.example/x'] }, { occurred_on: '2024-11-02', quantity: 0 }, { occurred_on: '2024-11-02', label: 'x'.repeat(201) }] })
+    assert.equal(bad.status, 400); assert.deepEqual(bad.json.rejected.map((x: any) => x.index), [4, 5, 6, 7, 8]); assert.equal(await count('deliverable_events', { deliverable_id: S.runPosts }), before, 'one bad entry: NOTHING imported'); assert.equal(await count('deliverable_proofs', { deliverable_id: S.runPosts }), 0)
+    for (const junk of [{ entries }, { deliverable_id: NIL, entries }, { deliverable_id: S.tPosts, entries }, { deliverable_id: S.runPosts, entries: [] }, { deliverable_id: S.runPosts, entries: Array.from({ length: 401 }, () => entries[2]) }]) assert.equal((await imp(junk)).status, 400, JSON.stringify(junk).slice(0, 60))
+    assert.equal((await imp({ deliverable_id: S.runPosts, entries }, AGENT_A)).status, 403)
+    const ok = await imp({ deliverable_id: S.runPosts, entries, show_links_to_brand: true }); assert.equal(ok.status, 201, JSON.stringify(ok.json)); assert.deepEqual(ok.json, { imported: 4, links: 8, skipped_duplicates: 0, deliverable: { status: 'partial', delivered_quantity: 4, planned_quantity: 24 } })
+    const ev = (await svc.from('deliverable_events').select('occurred_on, label, source, created_by, quantity').eq('deliverable_id', S.runPosts).order('occurred_on')).data!
+    assert.deepEqual(ev.map((e) => [e.occurred_on, e.label, e.source, Number(e.quantity)]), [['2024-08-01', 'Announcement Post', 'tracker_import', 1], ['2024-10-04', null, 'tracker_import', 1], ['2024-10-27', null, 'tracker_import', 1], ['2024-11-01', null, 'tracker_import', 1]]); assert.ok(ev.every((e) => e.created_by === TEAM))
+    const pr = (await svc.from('deliverable_proofs').select('platform, event_id, report_visible, url, name').eq('deliverable_id', S.runPosts)).data!; assert.equal(pr.length, 8); assert.ok(pr.every((x) => x.event_id && x.report_visible === true)); assert.deepEqual(Array.from(new Set(pr.map((x) => x.platform))).sort(), ['facebook', 'instagram', 'tiktok', 'x']); assert.ok(pr.some((x) => x.name === 'Instagram — Announcement Post'))
+    assert.deepEqual((await imp({ deliverable_id: S.runPosts, entries })).json.imported, 0, 'the same tracker again'); assert.equal((await imp({ deliverable_id: S.runPosts, entries })).json.skipped_duplicates, 4)
+    const grown = await imp({ deliverable_id: S.runPosts, entries: [...entries, { occurred_on: '2024-12-01', links: [igp('IMP5')] }] }); assert.deepEqual([grown.json.imported, grown.json.skipped_duplicates, grown.json.deliverable.delivered_quantity], [1, 4, 5], 'an UPDATED tracker adds only the new row')
+    const plain = [{ occurred_on: '2025-01-10', label: 'Shoot day 1' }, { occurred_on: '2025-01-11', label: 'Shoot day 2' }]; assert.deepEqual((await imp({ deliverable_id: S.runShoot, entries: plain })).json.deliverable, { status: 'delivered', delivered_quantity: 2, planned_quantity: 2 }, 'entries without links work too'); assert.equal((await imp({ deliverable_id: S.runShoot, entries: plain })).json.imported, 0, 'and are not doubled either')
+    const rep = (await preview(S.runP)).json.report; assert.ok(rep.timeline.some((e: any) => e.type === 'delivery' && e.text.endsWith('Announcement Post') && e.date === '2024-08-01'), 'imported posts are on the brand timeline'); assert.equal(rep.deliverables.find((x: any) => x.period === 'Year 1' && x.description.startsWith('Social')).proofs.length, 8, 'the 8 links imported WITH the brand tick are shown; the later one, imported without it, is not')
+  })
+
+  console.log('\nTracker import — an ad-campaign report (summary and daily) and a status list')
+  const adsFile = async () => {
+    const wb = new ExcelJS.Workbook()
+    const n = wb.addWorksheet('N88'); for (const r of [['N88 (CricketlineX)', 'N88 (CricketlineX)', null, 'N88 (Brand)', 'N88 (Brand)'], ['CAMPAIGN DATE', 45923, null, 'CAMPAIGN DATE', new Date(Date.UTC(2025, 8, 23))], ['GTD IMPRESSIONS', 15000000, null, 'GTD IMPRESSIONS', 13000000], ['IMPRESSIONS SERVED', 14441699, null, 'IMPRESSIONS SERVED', 14441699], ['IMPRESSIONS PENDING', 558301, null, 'IMPRESSIONS PENDING', -1441699], ['CLICKS', 148880, null, 'CLICKS', 148880], [],
+      ['BD', 'BD', 'BD', 'BD', 'BD'], ['ADS Type', 'GTD Impressions', 'Impressions Served', 'Clicks', 'CTR'], ['Intersitial Ads', 3000000, 1306377, 113467, 0.0869], ['Banner Ads', 12000000, 13135322, 35413, 0.0027], ['Total', 15000000, 14441699, 148880, 0.0103]]) n.addRow(r)
+    const w = wb.addWorksheet('W999'); for (const r of [['W999', 'W999'], ['GTD IMPRESSIONS', 7000000], ['IMPRESSIONS SERVED', 7771682], ['CLICKS', 206250], [], ['INDIA', 'INDIA', 'INDIA', 'INDIA'], ['ADS Type', 'Impression', 'Clicks', 'CTR'], ['Intersitial Ads', 204392, 61470, 0.3007], ['Banner Ads', 3532281, 14708, 0.0042], [],
+      ['BD', 'BD', 'BD', 'BD'], ['ADS Type', 'Impression', 'Clicks', 'CTR'], ['Intersitial Ads', 144848, 77690, 0.53], ['Banner Ads', 2308339, 4910, 0.002]]) w.addRow(r)
+    const y = wb.addWorksheet('YOLO'); for (const r of [['YOLO', 'YOLO'], ['GTD IMPRESSIONS', 90000000], [], ['INDIA', 'INDIA', 'INDIA', 'INDIA'], ['ADS Type', 'Impression', 'Clicks', 'CTR'], ['Banner Ads', 25501356, 66505, 0.0026], [], ['BD', 'BD', 'BD', 'BD'], ['ADS Type', 'Impression', 'Clicks', 'CTR'], ['Intersitial Ads', 144848, 77690, 0.53], ['Banner Ads', 2308339, 4910, 0.002]]) y.addRow(r)
+    const d = wb.addWorksheet('DAILY'); d.addRow(['Column 1', 'Column 2', 'Type of Inventory', 'GTD Impressions', 'Delivered', 'Total Clicks', 'Total CTR', 'Shortfall'])
+    for (const [day, reg, type, del, clk] of [[17, 'INDIA', 'BANNER', 600, 6], [17, 'PK', 'BANNER', 50, 1], [18, 'INDIA', 'BANNER', 400, 4], [18, 'INDIA', 'INTERSTITIAL', 100, 9], [24, 'INDIA', 'BANNER', 1000, 10], [25, 'PK', 'BANNER', 70, null]] as const) d.addRow([new Date(Date.UTC(2025, 10, day)), reg, type, 1000, del, clk, 0.01, 0])
+    d.addRow([null, 'INDIA', 'BANNER', 1, 999, 9, 0, 0])
+    const p = wb.addWorksheet('Progress'); for (const r of [['Team x Brand', 'Team x Brand', 'Team x Brand'], ['Deliverables', 'Comments', 'Links'], ['BEFORE MATCH', 'BEFORE MATCH', 'BEFORE MATCH'], ['Hospitality Tickets', 'Not Completed', null], ['Branded posts', 'Completed', { text: 'https://docs.google.com/spreadsheets/d/1UeaeSHEET/edit', hyperlink: 'https://docs.google.com/spreadsheets/d/1UeaeSHEET/edit?usp=sharing' }],
+      ['DURING MATCH', 'DURING MATCH', 'DURING MATCH'], ['LED Boards', 'Completed', 'https://drive.google.com/drive/folders/15Ep1LEDBOARDS'], ['Giant screen', 'Completed', null], ['Match Images', 'Completed', 'https://drive.google.com/drive/folders/15Ep1IMAGES'], ['AFTER MATCH', 'AFTER MATCH', 'AFTER MATCH'], ['Meet & Greet', 'Not Completed', 'not wanted by brand']]) p.addRow(r as any)
+    return Buffer.from(await wb.xlsx.writeBuffer())
+  }
+
+  await step('ad-campaign preview: reads the regions and ad types, keeps the PUBLISHER\'s guarantee apart from the brand\'s — and flags a report that disagrees with itself or with another sheet', async () => {
+    const d = await winDeal('digital_publisher_app', 'ads'); S.adP = d.projectId; const ctr = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: d.dealId, renewal_date: '2027-01-31' } }); assert.equal(ctr.status, 201)
+    const mk = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description: 'Guaranteed impressions', planned_quantity: 1000000, unit: 'impressions' }, params: { id: ctr.json.id } }); assert.equal(mk.status, 201); S.adImp = mk.json.id
+    const buf = await adsFile(); const o = await previewT(S.adP, buf); assert.deepEqual(o.json.sheets.map((x: any) => [x.name, x.looks_like]), [['N88', 'ad_campaign'], ['W999', 'ad_campaign'], ['YOLO', 'ad_campaign'], ['DAILY', 'ad_daily'], ['Progress', 'status_list']])
+    const n = (await previewT(S.adP, buf, { kind: 'ad_campaign', sheet: 'N88' })).json.result; assert.deepEqual([n.vendorGtd, n.brandGtd, n.sheetGtd], [15000000, 13000000, null]); assert.deepEqual(n.blocks.map((b: any) => b.campaignDate), ['2025-09-23', '2025-09-23'], 'the date lost to a raw number is recovered')
+    assert.deepEqual(n.segments.map((x: any) => [x.segment, x.impressions, x.clicks]), [['BD · Interstitial', 1306377, 113467], ['BD · Banner', 13135322, 35413]]); assert.deepEqual(n.checks, [], 'a consistent sheet raises nothing')
+    const w = (await previewT(S.adP, buf, { kind: 'ad_campaign', sheet: 'W999' })).json.result; const has = (list: string[], re: RegExp) => assert.ok(list.some((x) => re.test(x)), `expected ${re} in ${JSON.stringify(list)}`)
+    has(w.checks, /IN · Interstitial: a click-through rate of 30\.1% is implausibly high/); has(w.checks, /summary says 206,250 clicks, but the regional tables add up to 158,778/); has(w.checks, /BD · Interstitial has EXACTLY the same figures as in the sheet "YOLO"/); assert.equal(w.sheetGtd, 7000000, 'a single GTD is not assumed to be the brand\'s')
+    const day = (await previewT(S.adP, buf, { kind: 'ad_daily', sheet: 'DAILY' })).json.result; assert.deepEqual([day.rowsRead, day.rowsSkipped, day.firstDay, day.lastDay], [6, 1, '2025-11-17', '2025-11-25']); assert.deepEqual(day.segments.map((x: any) => [x.segment, x.impressions, x.clicks]), [['IN · Banner', 2000, 20], ['IN · Interstitial', 100, 9], ['PK · Banner', 120, 1]])
+    assert.equal(day.readings.length, 6, 'one running total per segment per week'); assert.equal(await count('project_metrics', { project_id: S.adP }), 0, 'previews save nothing')
+  })
+
+  await step('ad-campaign import: impressions and clicks per region as running totals, CTR calculated (not averaged), the deliverable set to what was served; impossible figures refused; the same report twice adds nothing', async () => {
+    const buf = await adsFile(); const n = (await previewT(S.adP, buf, { kind: 'ad_campaign', sheet: 'N88' })).json.result
+    const imp = (body: unknown, as = MANAGER, pid = S.adP) => call(H.tiCampaign.POST, { as, method: 'POST', body, params: { id: pid } })
+    const readings = n.segments.map((x: any) => ({ recorded_on: '2025-10-31', segment: x.segment, impressions: x.impressions, clicks: x.clicks })); const good = { deliverable_id: S.adImp, readings, brand_quantity: n.brandGtd, vendor_quantity: n.vendorGtd }
+    assert.equal((await imp(good, TEAM)).status, 403, 'changing what was guaranteed is Manager/CEO'); assert.equal((await imp({ ...good, deliverable_id: S.runPosts }, MANAGER, S.runP)).status, 400, 'a project whose inventory is not a publisher/app has no impressions to record')
+    for (const bad of [{ ...good, deliverable_id: NIL }, { ...good, readings: [] }, { ...good, brand_quantity: 0 }, { ...good, readings: [{ ...readings[0], clicks: readings[0].impressions + 1 }] }, { ...good, readings: [{ ...readings[0], recorded_on: isoDay(5) }] }, { ...good, readings: [{ ...readings[0], segment: '  ' }] }, { ...good, readings: [{ ...readings[0], impressions: -5 }] }, { ...good, readings: [readings[0], readings[0]] }, { ...good, readings: Array.from({ length: 1501 }, () => readings[0]) }])
+      assert.equal((await imp(bad)).status, 400, JSON.stringify(bad).slice(0, 80))
+    const wild = { deliverable_id: S.adImp, readings: [{ recorded_on: '2025-10-31', segment: 'BD · Interstitial', impressions: 144848, clicks: 77690 }] }; const refused = await imp(wild); assert.equal(refused.status, 409); assert.deepEqual(refused.json.implausible, ['BD · Interstitial: 53.6%']); assert.match(refused.json.error, /almost certainly an error/)
+    assert.equal(await count('project_metrics', { project_id: S.adP }), 0, 'every refused import saved NOTHING'); assert.equal(Number((await delRow(S.adImp)).delivered_quantity), 0)
+    const ok = await imp(good); assert.equal(ok.status, 201, JSON.stringify(ok.json)); assert.deepEqual(ok.json, { readings_added: 5, segments: 2, as_of: '2025-10-31', served: 14441699, clicks: 148880, ctr_pct: 1.03, deliverable: { status: 'delivered', delivered_quantity: 14441699, planned_quantity: 13000000 } })
+    const row = (await svc.from('deliverables').select('planned_quantity, vendor_quantity, delivered_quantity, status').eq('id', S.adImp).single()).data!; assert.deepEqual([Number(row.planned_quantity), Number(row.vendor_quantity), Number(row.delivered_quantity), row.status], [13000000, 15000000, 14441699, 'delivered'])
+    const m = (await metricsOf(S.adP)).json; const sm = (k: string) => m.summary.find((x: any) => x.metric_key === k); assert.deepEqual([sm('impressions').value, sm('impressions').subjects, sm('clicks').value, sm('ctr').value], [14441699, 2, 148880, 1.03], 'CTR is total clicks ÷ total impressions (1.03%), not the 4.5% an average of the two segments\' rates would give')
+    assert.ok(m.entries.every((e: any) => e.source === 'Publisher report (imported)' && e.recorded_by_name === 'manager user'))
+    const again = await imp(good); assert.deepEqual([again.status, again.json.readings_added], [200, 0], 'the same report again adds nothing')
+    const later = readings.map((r: any) => ({ ...r, recorded_on: '2025-11-30', impressions: r.impressions + 1000, clicks: r.clicks + 10 })); const up = await imp({ deliverable_id: S.adImp, readings: later }, TEAM); assert.equal(up.status, 201, 'Team can import a newer report when the guarantees are not being changed'); assert.equal(up.json.served, 14443699)
+    assert.equal(sumOf(await metricsOf(S.adP), 'impressions').value, 14443699, 'the newer report REPLACES the running totals, it does not add to them')
+    const forced = await imp({ ...wild, acknowledge_implausible: true }); assert.equal(forced.status, 201, 'an implausible figure CAN be imported, but only deliberately'); assert.equal(forced.json.served, 14443699, 'and an OLDER reading for one region does not drag the delivered figure backwards'); assert.equal(Number((await delRow(S.adImp)).delivered_quantity), 14443699)
+    const blob = JSON.stringify((await preview(S.adP)).json.report); assert.ok(!blob.includes('15000000') && blob.includes('13000000'), 'the brand sees its own guarantee (13M), never the publisher\'s (15M)')
+    const mkLog = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description: 'Logged thing', planned_quantity: 5 }, params: { id: (await svc.from('deliverables').select('contract_id').eq('id', S.adImp).single()).data!.contract_id } }); await logIt(mkLog.json.id, { occurred_on: isoDay(-1) })
+    const logged = await imp({ deliverable_id: mkLog.json.id, readings }); assert.equal(logged.status, 409); assert.match(logged.json.error, /tracked by a delivery log/)
+  })
+
+  await step('daily ad figures import as weekly running totals — a later week replaces an earlier one, the trend is kept', async () => {
+    const d = await winDeal('digital_publisher_app', 'ads daily'); const ctr = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: d.dealId, renewal_date: '2027-01-31' } }); const mk = await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description: 'Guaranteed impressions', planned_quantity: 5000 }, params: { id: ctr.json.id } })
+    const day = (await previewT(d.projectId, await adsFile(), { kind: 'ad_daily', sheet: 'DAILY' })).json.result
+    const r = await call(H.tiCampaign.POST, { as: TEAM, method: 'POST', body: { deliverable_id: mk.json.id, readings: day.readings }, params: { id: d.projectId } }); assert.equal(r.status, 201, JSON.stringify(r.json)); assert.deepEqual([r.json.served, r.json.clicks, r.json.segments, r.json.as_of, r.json.deliverable.status], [2220, 30, 3, '2025-11-25', 'partial'])
+    const rep = (await preview(d.projectId)).json.report; assert.deepEqual(rep.metrics.series.find((x: any) => x.label === 'Impressions').points, [{ date: '2025-11-18', value: 1150 }, { date: '2025-11-25', value: 2220 }], 'two weeks, each a running total: 1,000 + 100 + 50, then 2,000 + 100 + 120')
+  })
+
+  await step('status-list import: complete, waive or just attach links — matched to the contract\'s wording, permissions checked BEFORE anything is written, nothing done twice', async () => {
+    const d = await winDeal('team', 'status'); S.stP = d.projectId; const ctr = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: d.dealId, renewal_date: '2027-01-31' } })
+    const mk = async (description: string, planned: number) => (await call(H.deliverables.POST, { as: MANAGER, method: 'POST', body: { description, planned_quantity: planned }, params: { id: ctr.json.id } })).json.id as string
+    const led = await mk('No. of LED Boards', 4), giant = await mk('Logo on Giant Screen', 1), meet = await mk('Meet & Greet', 1), posts = await mk('Branded posts', 18), hosp = await mk('Hospitality Tickets', 6)
+    assert.equal((await patchDel(posts, { delivered_quantity: 5 }, TEAM)).status, 200)       // a number typed earlier, with no log
+    const pv = (await previewT(S.stP, await adsFile(), { kind: 'status_list', sheet: 'Progress' })).json.result
+    assert.deepEqual(pv.rows.map((x: any) => [x.name, x.section, x.status, x.suggestion, x.match]), [['Hospitality Tickets', 'BEFORE MATCH', 'not_completed', 'none', hosp], ['Branded posts', 'BEFORE MATCH', 'completed', 'complete', posts], ['LED Boards', 'DURING MATCH', 'completed', 'complete', led], ['Giant screen', 'DURING MATCH', 'completed', 'complete', giant], ['Match Images', 'DURING MATCH', 'completed', 'complete', null], ['Meet & Greet', 'AFTER MATCH', 'not_completed', 'waive', meet]])
+    assert.equal(pv.unmatched, 1, '"Match Images" is not on the contract, so it is matched to nothing')
+    const rows = pv.rows.filter((x: any) => x.match && x.suggestion !== 'none').map((x: any) => ({ deliverable_id: x.match, action: x.suggestion, links: x.links.map((l: any) => l.url), reason: x.remark ?? undefined }))
+    const imp = (body: unknown, as = MANAGER) => call(H.tiStatus.POST, { as, method: 'POST', body, params: { id: S.stP } }); const snap = async () => [await count('deliverable_events'), await count('deliverable_proofs'), (await delRow(meet)).status]; const before = await snap()
+    const team = await imp({ as_of: '2026-08-10', rows }, TEAM); assert.equal(team.status, 403, 'a waive in the list needs Manager/CEO'); assert.deepEqual(await snap(), before, '…and NOTHING else in that list was written either')
+    for (const bad of [{ rows }, { as_of: isoDay(5), rows }, { as_of: '2026-08-10', rows: [] }, { as_of: '2026-08-10', rows: [...rows, { deliverable_id: NIL, action: 'complete' }] }, { as_of: '2026-08-10', rows: [{ deliverable_id: led, action: 'explode' }] }, { as_of: '2026-08-10', rows: [{ deliverable_id: meet, action: 'waive' }] },
+      { as_of: '2026-08-10', rows: [{ deliverable_id: led, action: 'complete', links: ['https://evil.example/x'] }] }, { as_of: '2026-08-10', rows: [{ deliverable_id: hosp, action: 'links', links: [] }] }, { as_of: '2026-08-10', rows: [{ deliverable_id: led, action: 'complete' }, { deliverable_id: led, action: 'links', links: ['https://drive.google.com/drive/folders/x1'] }] }])
+      assert.equal((await imp(bad)).status, 400, JSON.stringify(bad).slice(0, 90)); assert.deepEqual(await snap(), before, 'bad lists: NOTHING written')
+    const ok = await imp({ as_of: '2026-08-10', rows, show_links_to_brand: true }); assert.equal(ok.status, 201, JSON.stringify(ok.json)); assert.deepEqual(ok.json, { completed: 3, already_complete: 0, waived: 1, already_waived: 0, links: 2 })
+    assert.deepEqual([(await delRow(led)).status, Number((await delRow(led)).delivered_quantity), (await delRow(giant)).status], ['delivered', 4, 'delivered'])
+    assert.deepEqual([(await delRow(posts)).status, Number((await delRow(posts)).delivered_quantity)], ['delivered', 18], 'the 5 typed earlier are not double-counted: the log now totals the 18 planned'); assert.deepEqual([(await delRow(meet)).status, (await delRow(meet)).waived_reason], ['waived', 'not wanted by brand']); assert.equal((await delRow(hosp)).status, 'planned', 'a "not completed" row is left alone')
+    const ev = (await svc.from('deliverable_events').select('occurred_on, label, source, quantity').eq('deliverable_id', led).single()).data!; assert.deepEqual([ev.occurred_on, ev.label, ev.source, Number(ev.quantity)], ['2026-08-10', 'Marked completed in the tracker', 'tracker_import', 4])
+    const pr = (await svc.from('deliverable_proofs').select('event_id, platform, report_visible, url').eq('deliverable_id', led).single()).data!; assert.ok(pr.event_id && pr.platform === 'drive' && pr.report_visible === true); assert.equal((await svc.from('deliverable_proofs').select('url').eq('deliverable_id', posts).single()).data!.url, 'https://docs.google.com/spreadsheets/d/1UeaeSHEET/edit', 'the clean link, once')
+    const again = await imp({ as_of: '2026-08-11', rows }); assert.deepEqual([again.status, again.json], [200, { completed: 0, already_complete: 3, waived: 0, already_waived: 1, links: 0 }], 'importing the same list again does nothing twice')
+    assert.equal((await imp({ as_of: '2026-08-11', rows: [{ deliverable_id: meet, action: 'complete' }] })).status, 400, 'a waived deliverable cannot be "completed"'); assert.equal((await imp({ as_of: '2026-08-11', rows: [{ deliverable_id: hosp, action: 'links', links: ['https://drive.google.com/drive/folders/tickets'] }] }, TEAM)).status, 201, 'Team can attach links')
+  })
+
+  console.log('\nRevenue management (PRD 6.23) — booked / invoiced / collected, margin by dimension, forecast, variance against plan')
+  const revOf = (q = '', as = CEO) => call(H.revenue.GET, { as, query: q })
+  const thisMonth = new Date().toISOString().slice(0, 7), one = (x: number) => Math.round(x * 10) / 10
+
+  await step('revenue: figures are CALCULATED from contracts, invoices and payments — in one currency at a time — and a deal with no cost on record counts as revenue but never as margin', async () => {
+    const usdBefore = (await revOf('?currency=USD&from=2026-01&to=' + thisMonth)).json
+    const pr = await call(H.properties.POST, { as: TEAM, method: 'POST', body: { name: 'Rev property', category_key: 'team', market: 'Revland', vendor_id: S.vendor, attributes: {} } }); const it = await call(H.items.POST, { as: TEAM, method: 'POST', body: { property_id: pr.json.id, name: 'Rev item' } })
+    assert.equal((await call(H.prices.POST, { as: TEAM, method: 'POST', body: { item_id: it.json.id, type: 'rack', amount: 5000, currency: 'AED' } })).status, 201)
+    const mkProposal = async (route: string, stages: string[], body: Record<string, unknown> = {}) => { const p = await call(H.proposals.POST, { as: TEAM, method: 'POST', body: { brand_id: S.Blitz, route_id: route, currency: 'AED', ...body } }); assert.equal(p.status, 201, JSON.stringify(p.json))
+      if (stages.length) { const l = await call(H.lines.POST, { as: TEAM, method: 'POST', body: { item_id: it.json.id }, params: { id: p.json.id } }); assert.equal(l.status, 201, JSON.stringify(l.json)); assert.equal((await call(H.margin.PATCH, { as: MANAGER, method: 'PATCH', body: { rate: 20 }, params: { id: p.json.id, lineId: l.json.id } })).status, 200)
+        for (const st of stages) assert.equal((await call(H.stage.PATCH, { as: MANAGER, method: 'PATCH', body: { to_stage: st }, params: { id: p.json.id } })).status, 200, st) }
+      return p.json.id as string }
+    const routeBefore = (await svc.from('routes').select('cut_method, cut_pct').eq('id', S.rBlitzMer).single()).data!
+    assert.equal((await svc.from('routes').update({ cut_method: 'onTop', cut_pct: 10 }).eq('id', S.rBlitzMer)).error, null)      // this route's agent takes 10% on top, for this one deal
+    const won = await mkProposal(S.rBlitzMer, ['Approved', 'Sent', 'Won']); await svc.from('routes').update(routeBefore).eq('id', S.rBlitzMer); const deal = (await svc.from('deals').select('id').eq('proposal_id', won).single()).data!.id
+    const ctr = await call(H.contracts.POST, { as: MANAGER, method: 'POST', body: { deal_id: deal, renewal_date: '2027-12-31' } }); assert.equal(ctr.status, 201, JSON.stringify(ctr.json))
+    const line = (await svc.from('proposal_lines').select('id, sell_price, quantity').eq('proposal_id', won).single()).data!; const pricing = (await svc.from('proposal_line_pricing').select('cost_used, agent_cut_amount').eq('proposal_line_id', line.id).single()).data!
+    const sell = Number(line.sell_price) * Number(line.quantity), cost = Number(pricing.cost_used), cut = Number(pricing.agent_cut_amount); assert.ok(sell > cost && cost === 5000 && cut > 0, `a real cost and a real agent cut: sell ${sell}, cost ${cost}, cut ${cut}`)
+    assert.equal((await call(H.schedule.POST, { as: MANAGER, method: 'POST', body: { installments: 2, first_due_date: '2026-12-01', interval_months: 1 }, params: { id: ctr.json.id } })).status, 201)
+    const invs = (await svc.from('invoices').select('id, amount, status').eq('contract_id', ctr.json.id).eq('direction', 'receivable').order('due_date')).data!; assert.equal(invs.length, 2)
+    assert.equal((await call(H.invoiceById.PATCH, { as: MANAGER, method: 'PATCH', body: { action: 'issue' }, params: { id: invs[0].id } })).status, 200); assert.equal((await call(H.invoicePayments.POST, { as: MANAGER, method: 'POST', body: { amount: 1000 }, params: { id: invs[0].id } })).status, 201)
+    const run = (body: Record<string, unknown>) => call(H.runningDeals.POST, { as: MANAGER, method: 'POST', body: { brand_id: S.Blitz, route_id: S.rBlitz, currency: 'AED', renewal_date: '2027-06-30', items: [{ item_id: it.json.id, sell_price: 2000 }], ...body } })
+    for (const bad of ['2999-01-01', '2026-02-30', 'March']) assert.equal((await run({ signed_on: bad })).status, 400, bad); const rd = await run({ signed_on: '2026-03-10' }); assert.equal(rd.status, 201, JSON.stringify(rd.json))
+    const sent = await mkProposal(S.rBlitz, ['Approved', 'Sent']); await mkProposal(S.rBlitz, [], { budget: 4000 }); const sentValue = Number((await svc.from('proposal_lines').select('sell_price').eq('proposal_id', sent).single()).data!.sell_price)
+
+    assert.equal((await revOf('?currency=AED', TEAM)).status, 403, 'Team does not see revenue or margin'); const mgr = await revOf('?currency=AED', MANAGER); assert.deepEqual([mgr.status, mgr.json.can_plan], [200, false])
+    const r = await revOf('?currency=AED&from=2026-01&to=' + thisMonth); assert.equal(r.status, 200, JSON.stringify(r.json).slice(0, 200)); const j = r.json; assert.equal(j.can_plan, true); assert.ok(j.currencies.includes('AED') && j.currencies.includes('USD'))
+    const m = (mo: string) => j.months.find((x: any) => x.month === mo)
+    assert.deepEqual([m(thisMonth).booked, m('2026-03').booked, j.totals.booked], [sell, 2000, sell + 2000], 'the normal deal is booked this month; the running deal in March, when it was SIGNED — not when it was typed in')
+    assert.deepEqual([m(thisMonth).invoiced, m(thisMonth).collected, j.totals.invoiced, j.outstanding], [Number(invs[0].amount), 1000, Number(invs[0].amount), Number(invs[0].amount) - 1000], 'only the ISSUED instalment is invoiced (the other is still a draft); 1,000 collected')
+    const brandRow = j.margins.brand[0]; assert.deepEqual([j.margins.brand.length, brandRow.key, brandRow.deals, brandRow.revenue, brandRow.cost, brandRow.gross, brandRow.net, brandRow.gross_pct, brandRow.net_pct, brandRow.unknown_cost_revenue],
+      [1, brandName, 2, sell + 2000, cost, sell - cost, sell - cost - cut, one(((sell - cost) / sell) * 100), one(((sell - cost - cut) / sell) * 100), 2000], 'gross = revenue − vendor cost; net = gross − the agent\'s cut; the 2,000 with no cost is revenue but not margin')
+    assert.deepEqual(j.margins.agent.map((x: any) => [x.key, x.revenue, x.gross_pct === null]), [['Meridian Sports', sell, false], ['Direct', 2000, true]]); assert.deepEqual(j.margins.market.map((x: any) => [x.key, x.revenue]), [['Revland', sell + 2000]]); assert.deepEqual(j.margins.category.map((x: any) => x.key), ['team'])
+    assert.equal(j.margins.vendor[0].revenue, sell + 2000); assert.equal(j.margins.owner.reduce((a: number, x: any) => a + x.revenue, 0), sell + 2000); assert.deepEqual(j.reconciliation, [])
+    assert.deepEqual(j.forecast.stages.map((x: any) => [x.stage, x.count, x.value, x.weight_pct, x.weighted]), [['Draft', 1, 4000, 10, 400], ['Review', 0, 0, 20, 0], ['Approved', 0, 0, 35, 0], ['Sent', 1, sentValue, 50, sentValue * 0.5], ['Negotiating', 0, 0, 75, 0]]); assert.deepEqual([j.forecast.total.estimated, j.forecast.total.weighted], [1, 400 + sentValue * 0.5], 'the draft has no priced line, so its budget stands in — and says so')
+    const usdAfter = (await revOf('?currency=USD&from=2026-01&to=' + thisMonth)).json; assert.deepEqual([usdAfter.totals, usdAfter.outstanding, usdAfter.margins.brand], [usdBefore.totals, usdBefore.outstanding, usdBefore.margins.brand], 'none of this touched the USD view: currencies are never added together')
+    for (const q of ['?from=2026-13', '?from=2026-05&to=2026-03', '?currency=aed', '?currency=DIRHAM', '?from=2019-01&to=2026-11', '?from=nope']) assert.equal((await revOf(q)).status, 400, q)
+    assert.deepEqual((await revOf('?currency=AED&from=2026-03&to=2026-03')).json.margins.brand.map((x: any) => x.revenue), [2000], 'a period limits margin to deals signed in it')
+  })
+
+  await step('revenue: only the CEO sets the plan and the forecast weights; variance is actual against plan; a month with no plan shows none', async () => {
+    const plan = (body: unknown, as = CEO) => call(H.revenuePlan.PUT, { as, method: 'PUT', body }); const weights = (body: unknown, as = CEO) => call(H.revenueWeights.PUT, { as, method: 'PUT', body })
+    const march = async () => (await revOf('?currency=AED&from=2026-02&to=2026-03')).json.months
+    assert.deepEqual((await march()).map((x: any) => [x.month, x.plan_booked, x.booked_variance]), [['2026-02', null, null], ['2026-03', null, null]], 'no plan: no variance')
+    assert.equal((await plan({ period: '2026-03', currency: 'AED', booked_target: 1000 }, MANAGER)).status, 403); assert.equal((await plan({ period: '2026-03', currency: 'AED', booked_target: 1000 }, TEAM)).status, 403)
+    for (const bad of [{ period: '2026-3', currency: 'AED', booked_target: 1 }, { period: '2026-03-01', currency: 'AED', booked_target: 1 }, { period: '2026-03', currency: 'aed', booked_target: 1 }, { period: '2026-03', currency: 'AED', booked_target: -1 }, { period: '2026-03', currency: 'AED', booked_target: 'lots' }, { period: '2026-03', currency: 'AED' }, { period: '2026-03', currency: 'AED', booked_target: 1, collected_target: -2 }, { period: '2026-03', currency: 'AED', booked_target: 1, note: 'n'.repeat(301) }])
+      assert.equal((await plan(bad)).status, 400, JSON.stringify(bad)); assert.equal(await count('revenue_plan'), 0, 'refused plans saved nothing')
+    assert.equal((await plan({ period: '2026-03', currency: 'AED', booked_target: 1000, collected_target: 500 })).status, 200); let mar = (await march())[1]; assert.deepEqual([mar.plan_booked, mar.booked_variance, mar.booked_pct, mar.plan_collected, mar.collected_variance], [1000, 1000, 200, 500, -500], 'booked 2,000 against 1,000: +1,000 (200%); collected 0 against 500')
+    assert.equal((await plan({ period: '2026-03', currency: 'AED', booked_target: 4000 })).status, 200); mar = (await march())[1]; assert.deepEqual([mar.plan_booked, mar.booked_variance, mar.booked_pct, mar.plan_collected], [4000, -2000, 50, null], 'setting it again REPLACES the target'); assert.equal(await count('revenue_plan'), 1)
+    assert.equal((await revOf('?currency=USD&from=2026-03&to=2026-03')).json.months[0].plan_booked, null, 'an AED plan is not a USD plan'); assert.equal((await plan({ period: '2026-03', currency: 'AED', booked_target: null })).status, 200); assert.equal((await march())[1].plan_booked, null, 'cleared'); assert.equal(await count('revenue_plan'), 0)
+    assert.equal((await weights({ weights: { Sent: 80 } }, MANAGER)).status, 403); for (const bad of [{}, { weights: {} }, { weights: { Won: 50 } }, { weights: { Sent: 101 } }, { weights: { Sent: -1 } }, { weights: { Sent: 'high' } }, { weights: [80] }]) assert.equal((await weights(bad)).status, 400, JSON.stringify(bad))
+    const before = (await revOf('?currency=AED')).json.forecast; const w = await weights({ weights: { Sent: 80, Draft: 0 } }); assert.equal(w.status, 200); assert.deepEqual([w.json.weights.Sent, w.json.weights.Draft, w.json.weights.Negotiating], [80, 0, 75], 'only the stages given change')
+    const after = (await revOf('?currency=AED')).json.forecast; const sentV = before.stages.find((x: any) => x.stage === 'Sent').value; assert.deepEqual([after.total.weighted, after.total.value], [sentV * 0.8, before.total.value], 'the pipeline is the same; only its weighting changed')
+    assert.equal((await weights({ weights: { Sent: 50, Draft: 10 } })).status, 200); assert.ok(await count('audit_events', { action: 'revenue_plan_set' }) >= 2 && await count('audit_events', { action: 'pipeline_weights_set' }) >= 2)
   })
 
   await step('/api/health reports every migration present and no critical env missing', async () => {

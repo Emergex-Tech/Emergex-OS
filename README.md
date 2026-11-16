@@ -7,14 +7,16 @@ TypeScript, every write going through a real service layer, org-scoped
 multi-tenancy, the two-level property/item inventory model, category-driven
 re-confirmation, route scoring, and universal versioning.
 
+> **Deploying?** Follow `docs/DEPLOYMENT_CHECKLIST.md` — every migration, setting and upload step, in order.
+
 ## What has and hasn't been verified
 
 **Verified by execution, on a real PostgreSQL 16 plus a real PostgREST server:**
 - All SQL (schema, policies, functions, migrations 002–007, category seed) runs cleanly in order.
-- **An end-to-end suite (`tests/e2e`, 119 checks)** runs the *real route handlers* → real `supabase-js` → real PostgREST → real Postgres, acting as Team, Manager and CEO. It covers record creation, the whole pricing/approval/export/version/share flow, every permission boundary (Team refused where it should be), share conflicts and overrides, CSV import, user-management permission gates and the role-change/CEO-protection logic, the pipeline/won-lost/CEO-view permission boundaries (including the CEO-only `ceo_view.access` check), contracts/deliverables/notifications, agent access and contract files, an all-routes access sweep, the whole finance flow (schedules, payments, overdue, chasing, payables, CSV export), and `/api/health`. It is also what proves that every `select(... embed ...)` string the app uses resolves against the real schema.
+- **An end-to-end suite (`tests/e2e`, 136 checks)** runs the *real route handlers* → real `supabase-js` → real PostgREST → real Postgres, acting as Team, Manager and CEO. It covers record creation, the whole pricing/approval/export/version/share flow, every permission boundary (Team refused where it should be), share conflicts and overrides, CSV import, user-management permission gates and the role-change/CEO-protection logic, the pipeline/won-lost/CEO-view permission boundaries (including the CEO-only `ceo_view.access` check), contracts/deliverables/notifications, agent access and contract files, an all-routes access sweep, the whole finance flow (schedules, payments, overdue, chasing, payables, CSV export), and `/api/health`. It is also what proves that every `select(... embed ...)` string the app uses resolves against the real schema.
 - **17 conflict-check scenarios** (`supabase/tests/conflicts.sql`), including the cases where it must *not* fire.
 - **Row-level security tested as four different signed-in users**, plus every insert shape the code uses.
-- `tsc --noEmit` is clean, `next build` succeeds, and 147 pure-logic checks pass (`npm run test:logic`). The finance SQL guarantees (overpayment trigger, void guard, constraints, RLS) are 12 more checks in `supabase/tests/finance.sql`.
+- `tsc --noEmit` is clean, `next build` succeeds, and 190 pure-logic checks pass (`npm run test:logic`). The finance SQL guarantees (overpayment trigger, void guard, constraints, RLS) are 12 more checks in `supabase/tests/finance.sql`.
 - **The tests were themselves tested.** After the finance tests passed first time, I deliberately broke the code four ways — leftover cents on the wrong instalment, the overpayment trigger dropped, a permission check removed from `/finance/overdue`, and Team given finance notifications — and confirmed each break was caught by exactly the test meant to catch it (47 of 49 passed with the two permission breaks in; the other two were caught by the pure and SQL suites). A suite that passes first time proves nothing until it's shown it can fail.
 
 **Not verified — there was no environment for it. Treat these as untested until you've seen them work:**
@@ -121,7 +123,10 @@ Upload the **contents** of this folder so that `package.json` sits at the top le
    16. `supabase/migrations/014_stage3_proof_metrics.sql`
    17. `supabase/migrations/015_stage3_closure_casestudies.sql`
    18. `supabase/migrations/016_stage3_reports.sql`
-   19. `supabase/seed_categories.sql` — loads the 12 inventory categories
+   19. `supabase/migrations/017_delivery_log.sql`
+   20. `supabase/migrations/018_running_deals.sql`
+   21. `supabase/migrations/019_revenue.sql`
+   22. `supabase/seed_categories.sql` — loads the 12 inventory categories
 
    If you ever paste a file twice into the same editor tab, or reuse a tab from a previous file without clearing it, Supabase will report an error from the *previous* file's content, not the one you meant to run — always paste into a fresh tab.
 
@@ -334,16 +339,29 @@ This completes Stage 2B **except B21 (matching suggestions from a brief), which 
 - **Not verified in a browser**: the three new screens (including the SVG price curve) have been type-checked and built, not looked at.
 
 
-## Dependency security — read before opening the agent portal
+## Dependency security and the Next.js 16 upgrade
 
-**Done:** Next.js upgraded from 14.2.5 to **14.2.35**, which fixes CVE-2025-55184 (a request that makes the server hang, high severity) and its incomplete first patch (CVE-2025-67779). This app uses **no middleware and no Server Actions**, so CVE-2025-29927 and CVE-2025-55183 never applied. A safe `npm audit fix` also cleared `source-map-js`. The whole suite passes on the new version.
+**Done: the app now runs on Next.js 16.4.6 and React 19** (it was on Next.js 14.2.35, the last release of a line that no longer receives security fixes). `npm audit --omit=dev` went from **7 findings (1 critical, 4 high, 2 moderate)** to **2, both moderate**:
+- **`exceljs` → `uuid` (moderate, 2 entries for one issue)** — only reachable if code hands `uuid` a pre-allocated buffer, which this code does not. The only "fix" npm offers is downgrading exceljs to a 2019 release; I advise against it. Everything else is clear.
 
-**Not done, and it matters:** `npm audit --omit=dev` still reports **7 findings (1 critical, 4 high, 2 moderate)**. They come from **Next.js 14 being end-of-life** — advisories published after it was retired were never back-ported, and the only fix npm offers is Next 16 (a major upgrade). Of those:
-- **`next` (reported "critical")** — about two dozen advisories, many about features this app doesn't use (middleware, Server Actions, rewrites, i18n, self-hosted or Windows servers, the image optimiser). Hosting on Vercel rather than self-hosting also removes some. **I have not verified that every one is harmless, and I'm not claiming it.**
-- **`postcss`, `glob`, `eslint-config-next`** — build-time tooling that travels with Next; cleared by the same major upgrade.
-- **`exceljs` → `uuid` (moderate)** — only reachable if code hands uuid a pre-allocated buffer, which this code doesn't. The only "fix" is downgrading exceljs to a 2019 release, which I'd advise against.
+**What changed in the code**
+- **All 110 route handlers that take a path parameter** (88 files) now receive `params` as a Promise and await it — Next 15+ requires this. The change was mechanical and counted: 110 expected, 110 transformed, 0 left in the old form.
+- **The sign-in check** (`src/lib/auth.ts`) awaits `cookies()`, which is asynchronous since Next 15.
+- **Pages needed no change** — they already read their ids with `useParams()`.
+- `eslint-config-next` was removed (there was no lint configuration, and Next 16's build no longer lints). `tsconfig.json` was updated by Next itself (`jsx: react-jsx`). The minimum Node version is now **20.9** (Vercel's default is newer).
+- Next 16 builds with **Turbopack** by default; the spreadsheet (exceljs) and PDF (pdf-lib) libraries bundle and load correctly under it.
 
-**Recommendation:** migrate to a supported Next.js major **before the agent portal is released to outsiders, or before you hold sensitive client data you couldn't afford to expose.** It is a real piece of work, not a version bump: Next 15/16 make `params` and `cookies()` asynchronous (touching ~90 route handlers and the sign-in code) and move to React 19. The end-to-end suite and the all-routes sweep are exactly the safety net for it. Add this to the agent-access review checklist.
+**How it was verified — three independent ways**
+1. **The whole test suite, unchanged in meaning:** 134 end-to-end steps across 140 routes, 177 logic checks, all eight database suites. The test harness now passes `params` as a Promise, exactly as the real server does — and I proved that matters: with **one** handler deliberately left not awaiting its params, **32 steps fail**.
+2. **The production build** compiles and type-checks under Next 16 (which validates every route's signature), from a clean install of the lock file.
+3. **A real server.** I started the production server (`next start`) against the test database and probed it: pages render; every unauthenticated API call answers a clean `401` (sign-in path + awaited params); the spreadsheet and PDF routes load; the daily job refuses a missing or wrong secret and runs with the right one; and a **public report was fetched end to end through the real server** — correct figure (44.4%), every security header present, a real PDF by link, both views in the view log, bad tokens answered with the identical `404` — with **zero errors in the server log**.
+
+**What this does NOT prove**
+- **Nothing was opened in a browser.** The server-rendered HTML was fetched, not looked at; React 19 hydration and every interactive screen are untested by me. **Click through the main screens after deploying** — sign in, a proposal, a project, the import tab.
+- **Sign-in itself** (Supabase Auth) cannot run in my sandbox; the suite substitutes "who is signed in". The cookie-reading code is exercised only up to "no session → 401".
+- **Vercel's build** is not my sandbox's build. The same commands succeed here from a clean folder; if Vercel's differs, the build log will say why.
+
+**Still worth doing before outsiders get access** (unchanged): the report-link review in `docs/REPORT_LINK_SECURITY_REVIEW.md`, and the agent-portal review.
 
 ## Stage 3 — live projects (first part: L1–L10, L28, L29)
 
@@ -466,6 +484,119 @@ Every Won deal now becomes a **project** with a checklist, parties, a communicat
 **Testing, including the tests being tested.** 23 pure report checks (**145 in all**), 8 database checks, and 15 new end-to-end steps (**119 in all**, across **132 routes** in the agent/anonymous access sweep — which now also asserts the public routes answer `404` and the cron route `401` to everyone without its secret). Every guard was broken on purpose and the break caught: **8 database guards** (a link's expiry or hash editable, the view log editable, snapshots editable, a link lasting years, a token stored as free text, two automatic snapshots a day, proof visible by default, agent branding without an agent), **16 pure rules** (proof shown unticked or archived, a database row copied into the report, an agent name on an EmergeX report, voided readings counted, an upload exposing a URL, any string accepted as a token, an over-long expiry, a link live at its exact expiry, a viewer hash shared across links, month-end clamping, a snapshot due early, vendor words not forbidden, the leak check reading keys not text, unsanitised PDF text, a key-order-sensitive shape check) and **11 route-level breaks** (the three alert kinds each switched off in its own step, and: expired/revoked links still working, hidden proof served, another project's proof reachable, no leak check at view time, the cron needing no secret, a link created despite a forbidden name, a blocked snapshot shown, a blocked snapshot sent as a PDF) — **each by the assertion meant to catch it, in separate runs so none hid behind another** (E5 was caught twice, once by the access sweep).
 **Things that went wrong on the way, all fixed:** Postgres stores JSON as `jsonb`, which **does not keep key order**, and my public route's "is this a valid snapshot" check was order-sensitive — it would have rejected *every* snapshot, so a brand could never have opened one; the end-to-end test caught it, it is fixed and a pure test now guards it. My first database break-tests were **meaningless**: the test used fixed values, so on the second run it died on a duplicate key *before* reaching the guard, and I nearly read the silence as "all caught"; I noticed the baseline had dropped from 8 passes to 2, made the test re-runnable, replaced my checker with one that distinguishes "caught / not caught / did not run", and redid all of them. A comment I appended to a SQL line commented out a variable declaration (the new checker flagged it as "did not run properly" rather than a catch).
 
+## Tracker foundation — the delivery log, waived, social proof links, periods, the vendor guarantee, metric segments (migration 017)
+
+Built from three real trackers (a celebrity ambassador deal, a team sponsorship, an ad-network campaign report). They could not be
+imported into the system as it stood — not for want of an "import" button, but because the system had nowhere to put what they hold.
+This release adds those places. The first two importers and the running-deal entry are in the next section.
+
+**What was built**
+- **A dated delivery log per deliverable.** Each post, match or day is one entry (date, quantity, a label such as "vs Jaffna Kings", optional links). **The delivered number is now the SUM of the log, kept true by the database itself** on every entry and every void — so no screen, route or importer can leave "6 delivered" beside a log that shows 5. Once a deliverable has a log, the number can no longer be typed (the app says why; the database refuses it independently). Deliverables with no log work exactly as before. Entries are **voided with a reason, never edited or deleted**; voiding recalculates the number and archives the links the entry carried.
+- **Social post links as proof.** A proof link may now be an Instagram, Facebook, X, TikTok or YouTube post as well as a Google Drive file — exact known hosts only, `https` only (look-alikes such as `instagram.com.evil.example`, link shorteners, ports and embedded credentials are refused). Links can hang on one log entry (a post's Instagram + Facebook + TikTok links). They are **hidden from the brand unless ticked** ("show these links to the brand" when logging, or the existing brand tick).
+- **"Waived by the brand".** A new status for work the brand no longer wants ("Meet & Greet — not wanted by brand"): Manager/CEO only, always with a reason, **left out of the delivery %** (it is neither a delivery nor a miss), nothing can be logged on it, and it can be reinstated. Waiving keeps whatever had already been delivered.
+- **A period label** on a deliverable ("Year 1", "LPL 2026"), shown to the brand.
+- **The vendor's guarantee** beside the brand's (e.g. the publisher guarantees us 4,000,000 impressions; we guarantee the brand 3,000,000). **Internal only** — it is not in the report allow-list and tests plant it to prove it never reaches a report or PDF.
+- **Metric segments** (a region, an ad type): each segment keeps its own running total, a newer reading replaces only its own segment, and the headline adds the segments.
+- **The brand report** now shows log entries on its timeline (the label, or "N posts delivered"), the period, and ticked social links. The closed-project lock covers the delivery log.
+
+**Decisions I made that you should review** (you had not answered these, so I took the safest default)
+- **Multi-year deals: one deliverable per period**, not one project per year — "24 posts — Year 1" and "24 posts — Year 2" are two deliverables on the same project. Say if you would rather split into a project per year.
+- **Post links are hidden from the brand until ticked**, like all proof. For imports I will add one "show these to the brand" tick per batch rather than per link.
+- **The vendor guarantee is visible to all staff** (your tracker is titled "INTERNAL" and shows both numbers), and never to a brand or an agent.
+- **Rates across segments are still averaged unweighted.** For an ad campaign the honest CTR is total clicks ÷ total impressions; the importer will record impressions and clicks per segment and I will compute CTR from those rather than average the per-segment rates.
+
+**Not built yet (next):** the four importers (post log, status list, deliverables list, ad-campaign report), entering a deal that is **already running** (today a deal can only arrive via proposal → Won), per-match fixtures as a schedule (a match is a labelled log entry for now), and forms for the period / vendor guarantee on the contract page (they can be set through the API and are shown on the project page).
+
+**Limits**
+- **Not verified in a browser:** the delivery-log panel and the waive / reinstate controls — type-checked and built only.
+- A log entry's label is free text the team types and it **is** shown to the brand on the timeline; the forbidden-name check still applies to it.
+
+**Testing, including the tests being tested.** 9 new pure checks (**156 in all**), 9 database checks, 7 new end-to-end steps (**126 in all**, **134 routes** in the access sweep) — all 126 passed on the first run, which is exactly when I trust tests least, so every guard was then broken on purpose: **8 database guards** (the number not derived from the log; typed over a log; entries editable; entries on replaced/waived/another organisation's deliverables; the log's own closed-project lock; waived without a reason; a proof on another deliverable's entry; a zero-quantity entry), **11 pure rules** (waived counted in the %; a delivery on a waived deliverable; look-alike hosts, http and ports accepted; segments sharing a total; voided or another project's entries on the brand timeline; a stored link shown unchecked; waived work shown as "due"; the whole row copied into the report) and **6 route-level breaks** in separate runs (an unacceptable link not stopping an entry; the app's typed-number guard removed — the database still refused it; voiding not archiving links; "reinstate" on something never waived; the platform not recorded; a metric's segment dropped). **One break was at first NOT caught:** dropping the log table's own lock changed nothing, because adding or voiding an entry makes the database update the deliverable and *its* lock refuses first. Tracing it found one path the second lock does not cover — voiding an entry on a deliverable that was logged and then waived — so I added that case and the break is now caught.
+**Environment notes:** the sandbox had been reset; I rebuilt it from the delivered zips and confirmed it reproduced the previous results exactly (119/119, all SQL suites, 147 logic checks) before building. One "run" tested nothing because Postgres had stopped — I noticed it printed no result line, and the run script now starts the database itself.
+
+## Tracker import — entering a running deal, and importing a deliverables list and a post log (migration 018)
+
+**What was built**
+- **Enter a deal that is already running** (Projects page → "Enter a deal that is already running…", Manager/CEO). For deals signed before this system: choose the brand, how they deal with you, the inventory item(s) and what the brand pays; it creates the proposal (already Won), the deal, the contract and the live project in one step. It is **marked as entered directly, so it never counts in win-rate or won/lost figures**, and **no cost is invented** — margin for these deals shows as unknown. The inventory item must exist first (it is what gives the project its category, vendor and metric set).
+- **Import tracker** (a new tab on the project page). Upload an Excel `.xlsx`, see what each sheet looks like, **review what was understood, then confirm — nothing is saved before the confirm**, and the file itself is never stored.
+  - **Deliverables list** (e.g. `ASSET | DETAILS | COMMENT`, or `SR NO | DELIVERABLES/T&CS | DETAILS | REMARKS`): reads each row and a quantity from the details — `18`, `6 per match`, `24 per year`, a tick. "Per year" creates one deliverable per year (Year 1, Year 2…); "per match" multiplies by the number of matches you give. **Whenever it had to guess it says so on the row** (a size such as "206.5 sq cm" is not a quantity; "0.2" is flagged; "All Posts" is assumed 1). Rows that look like **contract terms** (exclusivity, contract length, region, image rights) are shown but left unticked. Manager/CEO confirm.
+  - **Post log** (rows of dates and links, e.g. `Date | Instagram | Facebook | Twitter | TikTok`, or `Sr.No | Link | notes`): each row becomes one delivery-log entry on the deliverable you choose, with its links. It reads dates as people type them ("4th October 2024", "1 August 2024 ( Announcement Post" → the remark becomes the label), treats a link stored twice (clean text plus a hyperlink with a tracking parameter) as **one** link, ignores blank numbered rows and pasted junk, **lists any link it will not accept rather than dropping it silently**, shows a sheet's legend to you instead of mistaking it for a caption, and reads **green-highlighted** rows so you can label them (e.g. "collab accepted by brand"). Rows without a date need one from you. Links are hidden from the brand unless you tick "show these links to the brand".
+- **Importing the same tracker again adds only what is new** — so you can keep working in the sheet for a while and re-import it. One invalid row stops the whole import and names the row.
+
+**How I built the importers.** I ran the parsers against your three real files **before** writing tests, and the real files exposed what invented data would not have: a title row above the header; a header reading "DELIVERABLES/T&CS"; every Instagram link stored twice with a tracking parameter (25 links that are really 13); a legend in the notes column; "Contract Date" read as 15 deliverables; "Logo Size (sq. cm) 206.5" read as a quantity. Each is fixed and reproduced in a test on synthetic data. **Your files, and anything in them, are not part of this project.**
+
+**What your three trackers do with it today**
+- *Sunny Leone × Betjilli*: the deliverables list and both yearly post logs import (24 and 15 entries; one row needs a date from you).
+- *Galle Gallants × Babu88*: the deliverables list and the 39-post tracker import (27 green rows; the sheet has no dates, so you give one). **Not yet:** the "Progress of Deal" status list and the per-match grid.
+- *CricLineX*: **not yet** — the ad-campaign importer is next. Its Credentials column and Commercial sheet will never be imported.
+
+**Decisions I made that you should review**
+- A running deal's contract value is the sum of the item prices you enter; there is no separate "total" to disagree with.
+- A row that the tracker shows with **no acceptable link** is not imported (it is listed, greyed out).
+- Deliverables are matched for "already exists" by wording and period, ignoring case.
+
+**Limits**
+- **Only `.xlsx`** (download a Google Sheet as Excel), up to 4 MB.
+- The quantity reader is a set of rules, not understanding — **read the hints on the review screen**; they are there for the rows it was unsure of.
+- **Not verified in a browser:** the import tab and the running-deal form — type-checked and built only.
+
+**Testing, including the tests being tested.** 12 new pure checks (**168 in all**), 4 new end-to-end steps that build real `.xlsx` workbooks (hyperlinks with tracking parameters, green fills, a title row) and push them through upload → preview → confirm (**130 in all, 138 routes** in the access sweep; all passed on the first run). Then **20 deliberate breaks, each caught**: 13 parser rules (impossible dates rolling over; the day/month choice ignored; the remark after a date dropped; any colour counted as green; a doubled link counted twice; two YouTube videos merged; a refused link dropped silently; a legend used as a label; junk rows imported; contract terms ticked; a size read as a quantity; "per match" read as a plain number; a title row taken for the header) and 7 route-level breaks in separate runs (a running deal counted in the win rate — the test showed won 13 → 14; another brand's route accepted; the file-size limit removed — an oversized file was otherwise accepted; a re-imported list doubling; a bad row not stopping an import; nothing treated as a duplicate — the database's own rule still refused the copies; imported links shown to the brand without the tick). One break hid behind another in the same run and was re-run alone.
+
+## Tracker import, part 2 — an ad-campaign report and a status list (no new migration)
+
+**What was built** (all on the project page's **Import tracker** tab; same rule as before — review first, nothing saved until you confirm)
+- **Ad-campaign summary** (a publisher's report: guaranteed vs served impressions, clicks, split by region and ad type). It records impressions and clicks **per region and ad type as running totals**, sets the "guaranteed impressions" deliverable to what was served, and **calculates** the click-through rate from total clicks ÷ total impressions (it never averages the regions' rates). Where a sheet has two side-by-side blocks it keeps **what the publisher guarantees you** apart from **what you guarantee the brand**; where it shows a single guarantee it does **not** assume that is the brand's — it pre-fills the publisher's side and leaves the brand's for you. A date stored as a raw number (45928) is recovered.
+- **Daily ad figures** (Date | Region | Type | Delivered | Clicks). Daily rows are **added up** into running totals, keeping **one reading per week** plus the last day, so the trend survives without thousands of readings.
+- **The report checks the sheet against itself and against the other sheets**, because real reports contain errors: totals that do not add up, a "pending" figure that is not guaranteed − served, a region whose figures are identical to another region's or to another sheet's (a copy), and click-through rates above 20%. These are shown in red and you must tick "I have checked these" to import. **Independently, the server refuses a click-through rate above 20% unless you explicitly confirm it**, and always refuses more clicks than impressions.
+- **Status list** (Deliverable | Completed / Not Completed | link or remark). Each row is matched to the contract's wording ("LED Boards" → "No. of LED Boards") — and matched to **nothing** when it is ambiguous or not on the contract. Per row you choose: **mark completed** (logs what is still outstanding, with the link as proof), **waived by the brand** (suggested when the remark says "not wanted by brand"; Manager/CEO only), **only attach the link**, or leave it. Permissions are checked before anything is written, and importing the list again does nothing twice.
+- **What "served" means after several imports:** the sum of the **latest** reading per region and ad type across everything on record — so importing an older or partial report later can never drag the delivered figure backwards.
+
+**Your three trackers now**
+- *Sunny Leone × Betjilli* and *Galle Gallants × Babu88*: every sheet that holds data imports (the per-match grid in the Galle file is empty, so there is nothing in it to import).
+- *CricLineX*: each brand's sheet and the daily table import. **The Summary sheet's Credentials column and the Commercial sheet are never read into anything** — the importer returns only parsed figures, never raw cells.
+- On your real file the checks fire on **W999** (summary 206,250 clicks vs 288,850 in its tables; click rates of 30% and 54%) and **YOLO247** (239,424 vs 322,024; the same 54% segment, identical to W999's). Those need correcting in the source before they are worth importing.
+
+**Decisions I made that you should review**
+- **20%** is the click-through rate above which an import needs explicit confirmation.
+- A "completed" row logs the outstanding quantity on the date you give ("completed by"), since the sheet has no dates.
+- Each ad project needs its inventory to be in the *digital publisher / app* category — that is what gives it impressions and clicks to record.
+- One reading per **week** for daily figures.
+
+**Limits**
+- A report's regional split is only as good as the sheet: the importer flags inconsistencies, it cannot tell you which number is right.
+- **Not verified in a browser:** the three new import screens — type-checked and built only.
+
+**Testing, including the tests being tested.** I ran the parsers on your real CricLineX and Galle files before writing tests; the status list matched all ten rows correctly and the campaign checks found the real inconsistencies above without being told where to look. 9 new pure checks (**177 in all**) and 4 new end-to-end steps (**134 in all, 140 routes** in the access sweep). **23 deliberate breaks, each caught:** 16 parser rules (regions not normalised; a lost date not recovered; the two guarantees not kept apart; the guaranteed column read as served; each of the five self-checks switched off; daily figures not added up; every day kept; a waiver not recognised; one shared word matching a deliverable; a tie picking the first; section rows treated as deliverables; a refused link dropped silently) and 7 route-level breaks over three runs (the cross-sheet check removed; impossible click rates importing silently; Team waiving through an import; "served" taken from one file — the test showed delivered falling from 14,443,699 to 144,848; "complete" counting from a typed number; readings never treated as duplicates; "complete" applied again on every import).
+**A real bug found before it shipped:** tracing my own test against the route, I saw that an import set the delivered figure from *that file's* rows only, so a later, older or partial report would have overwritten 14.4 million served with a far smaller number. It now uses the latest stored reading per segment, and a test (and a deliberate break) guard it.
+
+## Revenue management (PRD 6.23) — migration 019
+
+A **Revenue** page (sidebar; CEO, Manager and Management — not Team, not agents). **Everything on it is calculated** from contracts, invoices, payments and proposal lines. The only things anyone types are the plan and the forecast weights.
+
+- **Booked / invoiced / collected, by month.** *Booked* is the contract value in the month the deal was **signed**. *Invoiced* counts receivable invoices that have been **issued** — not drafts, not voided invoices, not what you owe others. *Collected* is money actually received, in the month it arrived. *Outstanding* is everything invoiced and not yet paid, as of now.
+- **Margin by brand, agent, market, category, vendor and owner.** *Gross* = revenue − what the vendor is paid. *Net* = gross − the agent's cut. It reuses the figures the proposal's margin stack already stored, so the revenue page cannot disagree with the proposal.
+- **Deals with no cost on record** (those entered as already running) **count as revenue but never as margin.** Their revenue is shown in its own "cost unknown" column and the percentages are taken only over revenue whose cost is known. Guessing a cost would make every margin on the page untrustworthy.
+- **Forecast from the open pipeline**, weighted by stage (defaults: Draft 10%, Review 20%, Approved 35%, Sent 50%, Negotiating 75%). A proposal with no priced lines yet is valued at its budget, and the page says how many are.
+- **Variance against plan**, month by month. A month with no plan shows no variance rather than a misleading one. **Only the CEO sets the plan and the weights.**
+- **One currency at a time.** If you have deals in several currencies the page says so and never adds them together.
+- **Running deals now take a "Signed on" date**, so a deal signed in 2024 and entered today is booked in 2024, not this month.
+- If a contract's value no longer equals the sum of its lines, the page reports it (booked uses the contract; margin uses the lines).
+
+**Decisions I made that you should review**
+- **The default stage weights are mine.** Change them on the page (CEO) once you know your real win rates — the Won/Lost analysis page shows them.
+- **Booked date** = the "Signed on" date if given, otherwise the day the contract was created here.
+- **Margin is by the month the deal was signed**, not spread over the life of the contract. There is no revenue recognition over time.
+- **Team cannot see this page at all**, consistent with Team not seeing margins elsewhere.
+
+**Not built (the rest of PRD 6.23 / Stage 4):** saved forecast snapshots over time; multi-currency conversion to one reporting currency; tax / VAT; credit notes and refunds. **Not built at all:** the open API, Telegram / WhatsApp bots, brand logins, multi-agency.
+
+**Limits**
+- **Not verified in a browser:** the Revenue page — type-checked and built only.
+- Deals entered as already running show margin as unknown **forever** unless a cost is recorded for them; today there is no screen to add one after the fact.
+
+**Testing, including the tests being tested.** 13 pure checks with hand-computed figures (**190 in all**), 5 database checks, 2 end-to-end steps in a dedicated currency so every number is exact (**136 in all, 143 routes** in the access sweep). **29 deliberate breaks, each caught:** 16 arithmetic rules (drafts counted as invoiced; voided invoices and payments on them counted; what we owe counted as revenue; currencies added together; outstanding limited to the months shown; an unknown cost treated as zero; margin % diluted by unknown-cost revenue; net ignoring the agent's cut; the period not limiting margin; ungrouped deals dropped; a contract/lines mismatch not reported; custom weights ignored; currencies forecast together; variance shown with no plan; a zero target given a percentage; the last month of a range left out), 6 route-level over four runs (Team seeing revenue; the signing date ignored; a Manager setting the plan; clearing a month doing nothing; the agent's cut not read; a Manager changing the weights) and 7 database guards (Team reading the plan or the weights; a Manager holding the plan permission; Team holding the view permission; a mid-month plan; a weight for "Won"; the plan readable across organisations).
+**Things that went wrong on the way, all fixed:** I wrote the stage list from memory ("Pending Approval") — the real stage is "Review"; I found out by looking and corrected it before it ran. A comment I appended to a SQL line swallowed the comma after it, so the migration stopped halfway (the rebuild said so). My test fixture assumed the agent took a cut and it took none, so I set one for the test deal.
+
 ## Architecture notes for whoever builds Stage 2A next
 
 - Every new write path should go through `createRecord`/`updateRecord` in
@@ -477,6 +608,5 @@ Every Won deal now becomes a **project** with a checklist, parties, a communicat
   usually a sign a permission is missing, not that the role needs special-casing.
 - `price_records.proposal_id`, `price_records.outcome`, and
   `shares.proposal_version_id` are already nullable FKs into the empty
-  Test line
   `proposals`/`proposal_versions` tables — Stage 2A should populate those,
   not add new columns.

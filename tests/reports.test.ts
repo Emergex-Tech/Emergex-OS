@@ -94,8 +94,8 @@ await test('days left on a link round UP, so "expires today" still reads 1; the 
 console.log('the brand-facing report (L16) — an allow-list, tested against planted secrets')
 await test('the report has EXACTLY the allow-listed shape, at every level', () => {
   const r = buildReport(input()); assert.deepEqual(Object.keys(r), [...REPORT_KEYS])
-  assert.deepEqual(Object.keys(r.deliverables[0]), ['id', 'description', 'status', 'planned', 'delivered', 'unit', 'pct', 'due_date', 'proofs']); assert.deepEqual(Object.keys(r.deliverables[0].proofs[0]), ['id', 'name', 'kind', 'added_on', 'url'])
-  assert.deepEqual(Object.keys(r.branding), ['mode', 'agent_name']); assert.deepEqual(Object.keys(r.delivery), ['pct', 'counted', 'delivered', 'partial', 'planned', 'missed', 'replaced_excluded']); assert.deepEqual(Object.keys(r.metrics), ['summary', 'series'])
+  assert.deepEqual(Object.keys(r.deliverables[0]), ['id', 'description', 'period', 'status', 'planned', 'delivered', 'unit', 'pct', 'due_date', 'proofs']); assert.deepEqual(Object.keys(r.deliverables[0].proofs[0]), ['id', 'name', 'kind', 'added_on', 'url'])
+  assert.deepEqual(Object.keys(r.branding), ['mode', 'agent_name']); assert.deepEqual(Object.keys(r.delivery), ['pct', 'counted', 'delivered', 'partial', 'planned', 'missed', 'replaced_excluded', 'waived_excluded']); assert.deepEqual(Object.keys(r.metrics), ['summary', 'series'])
   assert.deepEqual(Object.keys(r.metrics.summary[0]), ['label', 'value', 'unit', 'aggregation', 'as_of', 'readings']); assert.deepEqual(Object.keys(r.timeline[0]), ['date', 'type', 'text'])
 })
 await test('NONE of the planted secrets — costs, vendors, internal notes, the invoice flag, who recorded what, a metric\'s source, hidden or archived proof — reaches the report', () => {
@@ -109,7 +109,7 @@ await test('only proof that is ticked AND not archived is shown; a link keeps it
 })
 await test('delivery %: per deliverable and overall, a replaced one is shown but not counted, a missed one counts as its delivered share', () => {
   const r = buildReport(input()); assert.deepEqual(r.deliverables.map((d) => [d.status, d.pct]), [['delivered', 100], ['partial', 75], ['missed', 0], ['replaced', 0]])
-  assert.deepEqual(r.delivery, { pct: 58.3, counted: 3, delivered: 1, partial: 1, planned: 0, missed: 1, replaced_excluded: 1 }, '(100 + 75 + 0) ÷ 3')
+  assert.deepEqual(r.delivery, { pct: 58.3, counted: 3, delivered: 1, partial: 1, planned: 0, missed: 1, replaced_excluded: 1, waived_excluded: 0 }, '(100 + 75 + 0) ÷ 3')
   assert.deepEqual(buildReport(input({ deliverables: [] })).delivery.pct, null, 'nothing to deliver shows no % rather than a false 0 or 100')
 })
 await test('metrics: the LATEST reading per deliverable (newer replaces older), voided readings ignored, counts added, rates averaged', () => {
