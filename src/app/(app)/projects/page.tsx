@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { supabaseBrowser } from '@/lib/supabaseBrowser'
+import RunningDealForm from '@/components/RunningDealForm'
 
 interface P { id: string; name: string; brand_name: string; template_key: string; owner_name: string | null; parent_project_id: string | null; checklist_pct: number | null; gate: 'cleared' | 'open'; delivery: { pct: number | null; counted: number }; waiting_on_us: number; waiting_on_them: number }
 
@@ -20,6 +21,7 @@ export default function Projects() {
   return (
     <div>
       <div className="flex justify-between items-baseline mb-4"><h1 className="text-lg font-semibold">Projects</h1>{canManage && <Link href="/project-templates" className="text-xs underline text-muted">Checklist templates</Link>}</div>
+      {canManage && <RunningDealForm />}
       {missing > 0 && (
         <div className="bg-[#211510] border border-[#4d321b] rounded-xl p-4 mb-4 flex justify-between items-center">
           <span className="text-sm text-amber">{missing} won deal{missing === 1 ? '' : 's'} {missing === 1 ? 'has' : 'have'} no project yet (won before projects existed, or creation failed).</span>

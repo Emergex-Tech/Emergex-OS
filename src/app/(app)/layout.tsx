@@ -79,7 +79,7 @@ select '${who.id}', id, '${who.email}', '${who.email}', 'ceo' from org;`}</pre>
   const nav = [
     ...NAV,
     ...(CEO_VIEW_ROLES.includes(role ?? '') ? [{ href: '/ceo-view', label: 'CEO View' }] : []),
-    ...(MANAGEMENT_ROLES.includes(role ?? '') ? [{ href: '/finance', label: 'Finance' }, { href: '/agent-access', label: 'Agent access' }, { href: '/users', label: 'Users' }] : [])
+    ...(MANAGEMENT_ROLES.includes(role ?? '') ? [{ href: '/finance', label: 'Finance' }, { href: '/revenue', label: 'Revenue' }, { href: '/agent-access', label: 'Agent access' }, { href: '/users', label: 'Users' }] : [])
   ]
 
   return (

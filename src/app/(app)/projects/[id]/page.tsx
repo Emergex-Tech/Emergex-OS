@@ -7,10 +7,12 @@ import ClosureControls from '@/components/ClosureControls'
 import CaseStudyPanel from '@/components/CaseStudyPanel'
 import ChatImport from '@/components/ChatImport'
 import ReportPanel from '@/components/ReportPanel'
+import DeliveryLog from '@/components/DeliveryLog'
+import TrackerImport from '@/components/TrackerImport'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-type Tab = 'checklist' | 'deliverables' | 'metrics' | 'parties' | 'log' | 'report' | 'case_study' | 'upsells'
-const STATUS_STYLE: Record<string, string> = { planned: 'text-muted', partial: 'text-amber', delivered: 'text-green-400', missed: 'text-red-400', replaced: 'text-muted line-through' }
+type Tab = 'checklist' | 'deliverables' | 'metrics' | 'parties' | 'log' | 'report' | 'case_study' | 'import' | 'upsells'
+const STATUS_STYLE: Record<string, string> = { planned: 'text-muted', partial: 'text-amber', delivered: 'text-green-400', missed: 'text-red-400', replaced: 'text-muted line-through', waived: 'text-muted' }
 
 export default function ProjectPage() {
   const { id } = useParams<{ id: string }>()
@@ -21,6 +23,7 @@ export default function ProjectPage() {
   const [pf, setPf] = useState({ role: 'vendor', name: '', contact: '' }); const [custom, setCustom] = useState({ phase_no: '1', side: 'team', title: '' }); const [qty, setQty] = useState<Record<string, string>>({})
 
   const [mx, setMx] = useState<any>(null); const [mf, setMf] = useState({ metric: '', value: '', recorded_on: '', source: '', source_ref: '', deliverable_id: '' })
+  const [openLog, setOpenLog] = useState<string | null>(null)
   const [openProof, setOpenProof] = useState<string | null>(null); const [proofs, setProofs] = useState<Record<string, any[]>>({}); const [proofUrl, setProofUrl] = useState('')
   const loadMetrics = async () => { const r = await fetch(`/api/projects/${id}/metrics`); if (r.ok) setMx(await r.json()) }
   const loadProofs = async (delId: string) => { const r = await fetch(`/api/deliverables/${delId}/proofs`); if (r.ok) { const data = await r.json(); setProofs((p) => ({ ...p, [delId]: data })) } }
@@ -89,7 +92,7 @@ export default function ProjectPage() {
           <div key={l} className="bg-panel border border-line rounded-xl p-3"><div className="text-xs font-mono text-muted uppercase">{l}</div><div className={`text-xl font-semibold ${c}`}>{v}</div><div className="text-xs text-muted">{s}</div></div>))}
       </div>
       {error && <div className="text-red-400 text-sm mb-2">{error}</div>}{notice && <div className="text-green-400 text-sm mb-2">{notice}</div>}
-      <div className="flex gap-2 mb-4">{(['checklist', 'deliverables', 'metrics', 'parties', 'log', 'report', 'case_study', 'upsells'] as Tab[]).map((t) => <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded text-sm capitalize ${tab === t ? 'bg-amber text-black font-semibold' : 'border border-line text-muted'}`}>{t === 'log' ? 'Communication log' : t === 'case_study' ? 'Case study' : t === 'report' ? 'Brand report' : t}</button>)}</div>
+      <div className="flex gap-2 mb-4">{(['checklist', 'deliverables', 'metrics', 'parties', 'log', 'report', 'case_study', 'import', 'upsells'] as Tab[]).map((t) => <button key={t} onClick={() => setTab(t)} className={`px-3 py-1.5 rounded text-sm capitalize ${tab === t ? 'bg-amber text-black font-semibold' : 'border border-line text-muted'}`}>{t === 'log' ? 'Communication log' : t === 'case_study' ? 'Case study' : t === 'report' ? 'Brand report' : t === 'import' ? 'Import tracker' : t}</button>)}</div>
 
       {tab === 'checklist' && (<div>
         {d.checklist.phases.map((ph: any) => (
@@ -108,15 +111,19 @@ export default function ProjectPage() {
 
       {tab === 'deliverables' && (<div>
         {!d.contract_id ? <div className="bg-panel border border-line rounded-xl p-6 text-center text-muted">Deliverables come from the contract. <Link href="/contracts" className="underline text-blue-400">Create the contract</Link> first.</div> : (<>
-          <div className="flex justify-between items-center mb-2"><span className="text-sm text-muted">Delivery {pct(sum.pct)} — every deliverable counts equally; a replaced one is left out (its make-good counts instead).</span>{canManage && <Link href={`/contracts/${d.contract_id}`} className="text-xs underline text-muted">Add or edit on the contract</Link>}</div>
+          <div className="flex justify-between items-center mb-2"><span className="text-sm text-muted">Delivery {pct(sum.pct)} — every deliverable counts equally; a replaced one and one waived by the brand are left out (its make-good counts instead).</span>{canManage && <Link href={`/contracts/${d.contract_id}`} className="text-xs underline text-muted">Add or edit on the contract</Link>}</div>
           <div className="bg-panel border border-line rounded-xl overflow-hidden"><table className="w-full text-sm">
             <thead className="text-xs text-muted uppercase"><tr className="border-b border-line"><th className="text-left p-3">Deliverable</th><th className="text-left p-3">Due</th><th className="text-right p-3">Delivered / planned</th><th className="text-right p-3">%</th><th className="text-left p-3">Status</th><th className="text-left p-3">Proof</th><th className="p-3"></th></tr></thead>
             <tbody>{d.deliverables.items.map((x: any) => (
               <tr key={x.id} className="border-b border-line last:border-0 align-top">
-                <td className="p-3">{x.description}{x.make_good_of && <span className="ml-2 text-[10px] text-amber uppercase">make-good</span>}{x.invoice_adjustment && <div className="text-xs text-amber">Invoice adjustment: {x.adjustment_note}</div>}</td>
+                <td className="p-3">{x.description}{x.period_label && <span className="ml-2 text-[10px] text-muted uppercase">{x.period_label}</span>}{x.make_good_of && <span className="ml-2 text-[10px] text-amber uppercase">make-good</span>}{x.invoice_adjustment && <div className="text-xs text-amber">Invoice adjustment: {x.adjustment_note}</div>}
+                  {x.status === 'waived' && <div className="text-xs text-muted">Waived by the brand: {x.waived_reason}</div>}
+                  {x.vendor_quantity != null && <div className="text-[11px] text-muted" title="Internal only — never shown to the brand">Vendor guaranteed us {Number(x.vendor_quantity).toLocaleString()} (brand is promised {Number(x.planned_quantity).toLocaleString()})</div>}
+                  <button className="text-xs underline text-muted mt-1" onClick={() => setOpenLog(openLog === x.id ? null : x.id)}>{openLog === x.id ? 'Hide log' : x.log_count > 0 ? `Delivery log (${x.log_count})` : 'Log a delivery'}</button>
+                  {openLog === x.id && <div className="mt-2 max-w-xl"><DeliveryLog deliverable={{ id: x.id, description: x.description, unit: x.unit, status: x.status }} closed={p.status === 'closed'} onChange={load} /></div>}</td>
                 <td className="p-3 font-mono text-xs">{x.due_date ?? '—'}</td>
                 <td className="p-3 text-right font-mono">{x.delivered_quantity} / {x.planned_quantity} <span className="text-muted text-xs">{x.unit}</span></td><td className="p-3 text-right font-mono">{x.pct}%</td>
-                <td className={`p-3 text-xs ${STATUS_STYLE[x.status]}`}>{x.status}</td>
+                <td className={`p-3 text-xs ${STATUS_STYLE[x.status]}`}>{x.status === 'waived' ? 'waived by brand' : x.status}</td>
                 <td className="p-3 text-xs min-w-[150px]">
                   <button className={`underline ${x.proof_count === 0 && x.delivered_quantity > 0 && (x.status === 'delivered' || x.status === 'partial') ? 'text-amber' : 'text-muted'}`} onClick={() => { const o = openProof === x.id ? null : x.id; setOpenProof(o); if (o) loadProofs(o) }}>{x.proof_count === 0 ? (x.delivered_quantity > 0 && (x.status === 'delivered' || x.status === 'partial') ? 'No proof yet' : 'Add proof') : `Proof (${x.proof_count})`}</button>
                   {openProof === x.id && (<div className="mt-2 space-y-1">
@@ -129,8 +136,10 @@ export default function ProjectPage() {
                     <div className="text-[10px] text-muted">Files up to 4 MB (png, jpg, pdf, Office); anything bigger: put it in Drive and paste the link.</div></div>)}
                 </td>
                 <td className="p-3 text-xs text-right whitespace-nowrap">
-                  {x.status !== 'replaced' && <><input type="number" min="0" className={`${inp} w-20 text-xs`} placeholder="delivered" value={qty[x.id] ?? ''} onChange={(e) => setQty({ ...qty, [x.id]: e.target.value })} /> <button className="underline text-muted mr-2" disabled={(qty[x.id] ?? '') === ''} onClick={async () => { if (await act(`/api/deliverables/${x.id}`, 'PATCH', { delivered_quantity: Number(qty[x.id]) }, 'Recorded.')) setQty({ ...qty, [x.id]: '' }) }}>Record</button></>}
+                  {x.status !== 'replaced' && x.status !== 'waived' && !x.log_count && <><input type="number" min="0" className={`${inp} w-20 text-xs`} placeholder="delivered" value={qty[x.id] ?? ''} onChange={(e) => setQty({ ...qty, [x.id]: e.target.value })} /> <button className="underline text-muted mr-2" disabled={(qty[x.id] ?? '') === ''} onClick={async () => { if (await act(`/api/deliverables/${x.id}`, 'PATCH', { delivered_quantity: Number(qty[x.id]) }, 'Recorded.')) setQty({ ...qty, [x.id]: '' }) }}>Record</button></>}
                   {canManage && (x.status === 'planned' || x.status === 'partial') && <button className="underline text-red-400 mr-2" onClick={() => window.confirm('Mark this deliverable as missed?') && act(`/api/deliverables/${x.id}`, 'PATCH', { status: 'missed' })}>Missed</button>}
+                  {canManage && ['planned', 'partial', 'missed'].includes(x.status) && <button className="underline text-muted mr-2" title="The brand no longer wants it — it leaves the delivery % and is not a miss" onClick={() => { const r = window.prompt('Why did the brand waive this? (e.g. "not wanted by the brand")'); if (r) act(`/api/deliverables/${x.id}`, 'PATCH', { status: 'waived', waived_reason: r }, 'Marked as waived by the brand.') }}>Waive</button>}
+                  {canManage && x.status === 'waived' && <button className="underline text-muted mr-2" onClick={() => act(`/api/deliverables/${x.id}`, 'PATCH', { status: 'reinstate' }, 'Reinstated.')}>Reinstate</button>}
                   {canManage && x.status === 'missed' && !x.invoice_adjustment && <><button className="underline text-muted mr-2" onClick={() => act(`/api/deliverables/${x.id}/make-good`, 'POST', {}, 'Make-good created.')}>Make-good</button><button className="underline text-muted" onClick={() => { const n = window.prompt('What should the invoice adjustment be?'); if (n) act(`/api/deliverables/${x.id}/invoice-adjustment`, 'POST', { flag: true, note: n }, 'Flagged for finance.') }}>Flag invoice adjustment</button></>}
                   {canManage && x.status === 'missed' && x.invoice_adjustment && <button className="underline text-muted" onClick={() => act(`/api/deliverables/${x.id}/invoice-adjustment`, 'POST', { flag: false })}>Clear flag</button>}
                 </td></tr>))}
@@ -162,6 +171,8 @@ export default function ProjectPage() {
           <input className={`${inp} flex-1`} placeholder="Name" value={pf.name} onChange={(e) => setPf({ ...pf, name: e.target.value })} /><input className={`${inp} flex-1`} placeholder="Contact (optional)" value={pf.contact} onChange={(e) => setPf({ ...pf, contact: e.target.value })} />
           <button disabled={!pf.name.trim()} onClick={async () => { if (await act(`/api/projects/${id}/parties`, 'POST', { role: pf.role, name: pf.name, contact: pf.contact || undefined, side: pf.role === 'other' ? 'delivery' : undefined })) setPf({ ...pf, name: '', contact: '' }) }} className="bg-amber text-black font-semibold px-3 py-1.5 rounded-md text-sm disabled:opacity-40">Add party</button></div>
       </div>)}
+
+      {tab === 'import' && <TrackerImport projectId={id} canManage={canManage} onDone={load} />}
 
       {tab === 'report' && <ReportPanel projectId={id} deliverables={d.deliverables.items.filter((x: any) => x.status !== 'replaced').map((x: any) => ({ id: x.id, description: x.description }))} canManage={canManage} closed={p.status === 'closed'} />}
 
