@@ -22,7 +22,7 @@ export function draftCaseStudy(i: CaseStudyInput): CaseStudyDraft {
   const props = i.propertyNames.length ? ` on ${joinList(i.propertyNames)}` : ''
   const where = i.markets.length ? ` in ${joinList(i.markets)}` : ''
   const cats = i.categories.length ? ` (${joinList(i.categories)})` : ''
-  const counted = i.deliverables.filter((d) => d.status !== 'replaced')
+  const counted = i.deliverables.filter((d) => d.status !== 'replaced' && d.status !== 'waived')
   const overview = [`${i.brandName} worked with EmergeX${props}${where}${cats}.`]
   if (i.deliveryPct != null) overview.push(`Overall delivery: ${i.deliveryPct}% across ${counted.length} deliverable${counted.length === 1 ? '' : 's'}.`)
   if (i.closedOn) overview.push(`Closed ${i.closedOn}.`)
@@ -36,6 +36,7 @@ export function draftCaseStudy(i: CaseStudyInput): CaseStudyDraft {
       case 'planned': return `- ${d.description}: not yet delivered`
       case 'missed': return `- ${d.description}: not delivered${d.delivered > 0 ? ` (${qty})` : ''}`
       case 'replaced': return `- ${d.description}: replaced by a make-good (counted under that deliverable)`
+      case 'waived': return `- ${d.description}: waived by the brand (not counted)`
       default: return `- ${d.description}: ${d.status}`
     }
   })

@@ -49,14 +49,14 @@ export async function renderReportPdf(r: Report): Promise<Uint8Array> {
 
   const d = r.delivery
   text(d.pct == null ? 'Delivery: nothing to deliver yet' : `Delivery ${d.pct}%`, { size: 16, font: bold, gap: 1 })
-  text(`${d.counted} deliverable${d.counted === 1 ? '' : 's'}: ${d.delivered} delivered, ${d.partial} partly delivered, ${d.planned} planned, ${d.missed} missed${d.replaced_excluded ? `  -  ${d.replaced_excluded} replaced by a make-good (not counted)` : ''}`, { size: 9, color: MUTED, gap: 4 })
+  text(`${d.counted} deliverable${d.counted === 1 ? '' : 's'}: ${d.delivered} delivered, ${d.partial} partly delivered, ${d.planned} planned, ${d.missed} missed${d.replaced_excluded ? `  -  ${d.replaced_excluded} replaced by a make-good (not counted)` : ''}${d.waived_excluded ? `  -  ${d.waived_excluded} waived by the brand (not counted)` : ''}`, { size: 9, color: MUTED, gap: 4 })
 
   if (r.deliverables.length) {
     heading('Deliverables')
     for (const x of r.deliverables) {
       const unit = x.unit ? ` ${x.unit}` : ''
-      text(x.description, { font: bold })
-      text(x.status === 'replaced' ? 'Replaced by a make-good (counted under that deliverable)' : `${x.status}  -  ${fmtNum(x.delivered)} of ${fmtNum(x.planned)}${unit}  -  ${x.pct}%${x.due_date ? `  -  due ${x.due_date}` : ''}`, { size: 9, color: MUTED, indent: 8 })
+      text(x.period ? `${x.description} (${x.period})` : x.description, { font: bold })
+      text(x.status === 'replaced' ? 'Replaced by a make-good (counted under that deliverable)' : x.status === 'waived' ? 'Waived by the brand (not counted)' : `${x.status}  -  ${fmtNum(x.delivered)} of ${fmtNum(x.planned)}${unit}  -  ${x.pct}%${x.due_date ? `  -  due ${x.due_date}` : ''}`, { size: 9, color: MUTED, indent: 8 })
       for (const p of x.proofs) text(`Proof: ${p.name} (${p.kind === 'link' ? 'link' : 'file'}, added ${p.added_on})`, { size: 9, indent: 8 })
       y -= 4
     }

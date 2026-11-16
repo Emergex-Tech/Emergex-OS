@@ -1,7 +1,7 @@
 // Pure logic for metrics (L13–L14), proof links (L11) and project risk (L26–L27) — no database.
 
 export interface MetricDef { category_key: string; key: string; label: string; unit: string | null; aggregation: 'sum' | 'avg'; position: number; active: boolean }
-export interface MetricEntry { deliverable_id: string | null; category_key: string; metric_key: string; value: number; recorded_on: string; created_at: string; voided_at?: string | null }
+export interface MetricEntry { deliverable_id: string | null; category_key: string; metric_key: string; value: number; recorded_on: string; created_at: string; voided_at?: string | null; segment?: string | null }
 
 /**
  * Each entry is the cumulative total AS OF its date. For every (deliverable, metric) the LATEST non-voided entry counts —
@@ -11,7 +11,7 @@ export function latestPerSubject(entries: MetricEntry[]): MetricEntry[] {
   const best = new Map<string, MetricEntry>()
   for (const e of entries) {
     if (e.voided_at) continue
-    const k = `${e.deliverable_id ?? '(project)'}|${e.category_key}|${e.metric_key}`
+    const k = `${e.deliverable_id ?? '(project)'}|${e.category_key}|${e.metric_key}|${e.segment ?? ''}`   // a segment (region / ad type) is its own running total
     const cur = best.get(k)
     if (!cur || e.recorded_on > cur.recorded_on || (e.recorded_on === cur.recorded_on && e.created_at > cur.created_at)) best.set(k, e)
   }

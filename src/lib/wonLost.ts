@@ -27,6 +27,7 @@ export async function buildWonLostAnalysis(orgId: string): Promise<WonLostAnalys
     .from('proposals')
     .select('id, stage, brand_id, route_id, brands(name), routes(market, agent_id, agents(name))')
     .eq('org_id', orgId)
+    .eq('origin', 'pipeline')   // a deal entered as already-running was never pitched here: counting it would flatter the win rate
     .in('stage', ['Won', 'Lost'])
   if (!proposals || proposals.length === 0) return { by_brand: [], by_agent: [], by_market: [], by_category: [], by_reason: [] }
 

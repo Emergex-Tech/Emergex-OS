@@ -1,11 +1,12 @@
 'use client'
 import type { Report } from '@/lib/reportBuilder'
+import { safeProofLink } from '@/lib/proofLinks'
 
 /* eslint-disable @next/next/no-img-element */
-const STATUS: Record<string, string> = { planned: 'text-muted', partial: 'text-amber', delivered: 'text-green-400', missed: 'text-red-400', replaced: 'text-muted line-through' }
+const STATUS: Record<string, string> = { planned: 'text-muted', partial: 'text-amber', delivered: 'text-green-400', missed: 'text-red-400', replaced: 'text-muted line-through', waived: 'text-muted' }
 const isImage = (name: string) => /\.(png|jpe?g)$/i.test(name)
-// A link proof is only ever opened if it is a plain https Google Drive / Docs link (the server checked this too — twice is cheap).
-const safeLink = (u: string | null) => { try { const x = new URL(u ?? ''); return x.protocol === 'https:' && (x.hostname === 'drive.google.com' || x.hostname === 'docs.google.com') ? x.toString() : null } catch { return null } }
+// A link proof is only ever opened if it still passes the allow-list (Drive/Docs or a known social host) — the server checked this too.
+const safeLink = (u: string | null) => safeProofLink(u)
 const num = (v: number) => (Math.round(v * 100) / 100).toLocaleString('en-US')
 
 function Spark({ points }: { points: { date: string; value: number }[] }) {
@@ -27,15 +28,15 @@ export default function ReportView({ report, proofHref }: { report: Report; proo
     <div className="bg-panel border border-line rounded-xl p-4 mb-5">
       <div className="text-xs font-mono text-muted uppercase">Delivery</div>
       <div className="text-4xl font-semibold">{d.pct == null ? '—' : `${d.pct}%`}</div>
-      <div className="text-sm text-muted">{d.counted} deliverable{d.counted === 1 ? '' : 's'}: {d.delivered} delivered · {d.partial} partly · {d.planned} planned · {d.missed} missed{d.replaced_excluded ? ` · ${d.replaced_excluded} replaced by a make-good (not counted)` : ''}</div>
+      <div className="text-sm text-muted">{d.counted} deliverable{d.counted === 1 ? '' : 's'}: {d.delivered} delivered · {d.partial} partly · {d.planned} planned · {d.missed} missed{d.replaced_excluded ? ` · ${d.replaced_excluded} replaced by a make-good (not counted)` : ''}{d.waived_excluded ? ` · ${d.waived_excluded} waived by the brand (not counted)` : ''}</div>
     </div>
 
     <h2 className="text-xs font-mono text-muted uppercase mb-2">Deliverables</h2>
     <div className="bg-panel border border-line rounded-xl mb-5 divide-y divide-line">
       {report.deliverables.length === 0 && <div className="p-4 text-muted text-sm">Nothing to show yet.</div>}
       {report.deliverables.map((x) => (<div key={x.id} className="p-3">
-        <div className="flex justify-between gap-3"><div className="font-semibold">{x.description}</div><div className={`text-sm ${STATUS[x.status] ?? ''}`}>{x.status === 'replaced' ? 'replaced by a make-good' : x.status}</div></div>
-        <div className="text-xs text-muted">{x.status === 'replaced' ? '' : `${num(x.delivered)} of ${num(x.planned)}${x.unit ? ' ' + x.unit : ''} · ${x.pct}%`}{x.due_date ? ` · due ${x.due_date}` : ''}</div>
+        <div className="flex justify-between gap-3"><div className="font-semibold">{x.description}{x.period ? <span className="text-muted font-normal"> · {x.period}</span> : null}</div><div className={`text-sm ${STATUS[x.status] ?? ''}`}>{x.status === 'replaced' ? 'replaced by a make-good' : x.status === 'waived' ? 'waived by the brand' : x.status}</div></div>
+        <div className="text-xs text-muted">{x.status === 'replaced' || x.status === 'waived' ? '' : `${num(x.delivered)} of ${num(x.planned)}${x.unit ? ' ' + x.unit : ''} · ${x.pct}%`}{x.due_date ? ` · due ${x.due_date}` : ''}</div>
         {x.proofs.length > 0 && <div className="mt-2 flex flex-wrap gap-3">{x.proofs.map((p) => {
           const link = p.kind === 'link' ? safeLink(p.url) : null
           if (p.kind === 'link') return link ? <a key={p.id} href={link} target="_blank" rel="noopener noreferrer" className="text-sm underline text-blue-400">{p.name} ↗</a> : <span key={p.id} className="text-sm text-muted">{p.name}</span>

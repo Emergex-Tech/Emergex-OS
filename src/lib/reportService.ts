@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import { supabaseService } from './supabaseServer'
 import { projectCategories, loadMetricDefs } from './projectService'
-import { buildReport, reportForbiddenNames, reportLeaks, type Report, type Branding, type RawDeliverable, type RawProof, type RawEntry } from './reportBuilder'
+import { buildReport, reportForbiddenNames, reportLeaks, type Report, type Branding, type RawDeliverable, type RawProof, type RawEntry, type RawEvent } from './reportBuilder'
 import type { Cadence } from './reportCadence'
 
 export interface ReportProject { id: string; name: string; deal_id: string; status: string }
@@ -33,18 +33,19 @@ export async function assembleReport(orgId: string, project: ReportProject, now 
   const agentName = settings.branding !== 'emergex' && settings.agent_id ? ((await svc.from('agents').select('name').eq('id', settings.agent_id).eq('org_id', orgId).maybeSingle()).data?.name ?? null) : null
 
   const { data: contract } = await svc.from('contracts').select('id').eq('deal_id', project.deal_id).eq('org_id', orgId).maybeSingle()
-  const { data: dels } = contract ? await svc.from('deliverables').select('id, description, status, planned_quantity, delivered_quantity, unit, due_date').eq('contract_id', contract.id).order('created_at') : { data: [] }
+  const { data: dels } = contract ? await svc.from('deliverables').select('id, description, status, planned_quantity, delivered_quantity, unit, due_date, period_label').eq('contract_id', contract.id).order('created_at') : { data: [] }
   const delIds = (dels ?? []).map((d) => d.id as string)
   const { data: proofs } = delIds.length ? await svc.from('deliverable_proofs').select('id, deliverable_id, name, kind, created_at, report_visible, archived_at, url').in('deliverable_id', delIds).order('created_at') : { data: [] }
+  const { data: events } = delIds.length ? await svc.from('deliverable_events').select('deliverable_id, occurred_on, quantity, label, voided_at').in('deliverable_id', delIds).is('voided_at', null).order('occurred_on').limit(5000) : { data: [] }
   const categories = await projectCategories(orgId, project.deal_id)
   const defs = await loadMetricDefs(categories)
-  const { data: entries } = await svc.from('project_metrics').select('deliverable_id, category_key, metric_key, value, recorded_on, created_at, voided_at').eq('project_id', project.id).eq('org_id', orgId).limit(5000)
+  const { data: entries } = await svc.from('project_metrics').select('deliverable_id, category_key, metric_key, segment, value, recorded_on, created_at, voided_at').eq('project_id', project.id).eq('org_id', orgId).limit(5000)
   const { data: parties } = await svc.from('project_parties').select('name, role').eq('project_id', project.id).in('role', ['vendor', 'delivery_agent'])
   const forbidden = reportForbiddenNames((parties ?? []).filter((p) => p.role === 'vendor').map((p) => p.name as string), (parties ?? []).filter((p) => p.role === 'delivery_agent').map((p) => p.name as string))
 
   const report = buildReport({
     generatedAt: now.toISOString(), asOf: utcToday(now), title: settings.title ?? project.name, brandName, branding: settings.branding, agentName,
-    deliverables: (dels ?? []) as unknown as RawDeliverable[], proofs: (proofs ?? []) as unknown as RawProof[],
+    deliverables: (dels ?? []) as unknown as RawDeliverable[], proofs: (proofs ?? []) as unknown as RawProof[], events: ((events ?? []) as unknown as RawEvent[]).map((e) => ({ ...e, quantity: Number(e.quantity) })),
     entries: ((entries ?? []) as unknown as RawEntry[]).map((e) => ({ ...e, value: Number(e.value) })), defs
   })
   return { report, leaks: reportLeaks(report, forbidden), settings }
